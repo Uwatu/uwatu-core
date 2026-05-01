@@ -48,7 +48,7 @@ func (h *Handler) handleMessage(client mqtt.Client, msg mqtt.Message) {
 	batteryFloat, _ := payload["battery_pct"].(float64)
 	battery := int(batteryFloat)
 
-	log.Printf("📱 [RECEIVED] Ping from %s (%s)", deviceID, msisdn)
+	log.Printf("[RECEIVED] Ping from %s (%s)", deviceID, msisdn)
 
 	// Give the data to the Enricher to ask Nokia about it!
 	h.enricher.Process(deviceID, msisdn, battery)
