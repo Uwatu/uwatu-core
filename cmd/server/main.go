@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
@@ -14,7 +15,19 @@ import (
 func main() {
 	config.LogInfo("SYSTEM", "Starting Uwatu Core API Gateway...")
 
-	nokiaClient := nokia.NewClient("fake_id", "fake_secret", "https://sandbox.networkascode.nokia.io")
+	key := os.Getenv("NOKIA_RAPIDAPI_KEY")
+	if len(key) > 8 {
+		config.LogInfo("DEBUG", fmt.Sprintf("Using API key starting with: %s...", key[:8]))
+	} else {
+		config.LogError("DEBUG", "API key NOT FOUND or too short")
+	}
+
+	nokiaClient := nokia.NewClient(
+		os.Getenv("NOKIA_RAPIDAPI_KEY"), // e.g., export NOKIA_RAPIDAPI_KEY=your-new-key
+		"network-as-code.nokia.rapidapi.com",
+		"https://network-as-code.p-eu.rapidapi.com",
+	)
+
 	enricher := ingestion.NewEnricher(nokiaClient)
 	mqttHandler := ingestion.NewHandler(enricher)
 

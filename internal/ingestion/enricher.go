@@ -2,26 +2,39 @@ package ingestion
 
 import (
 	"context"
-	"fmt"
 	"sync"
+	"time"
 
 	"github.com/uwatu/uwatu-core/internal/config"
 	"github.com/uwatu/uwatu-core/internal/models"
 	"github.com/uwatu/uwatu-core/internal/nokia"
 )
 
+// networkState stores the last retrieved data from Nokia to prevent
+// unnecessary API consumption while maintaining data continuity.
+type networkState struct {
+	lat        float64
+	lon        float64
+	simSwapped bool
+	lastFetch  time.Time
+}
+
 type Enricher struct {
 	nokiaClient *nokia.Client
+	mu          sync.RWMutex
+	cache       map[string]*networkState
 }
 
 func NewEnricher(nc *nokia.Client) *Enricher {
-	return &Enricher{nokiaClient: nc}
+	return &Enricher{
+		nokiaClient: nc,
+		cache:       make(map[string]*networkState),
+	}
 }
 
-// Process fires the Nokia APIs and builds the final Matrix
+// Process coordinates the fusion of real-time sensor data with periodic network-layer signals.
 func (e *Enricher) Process(deviceID string, msisdn string, battery int, temp float64, accel int) {
-	ctx := context.Background()
-
+	// Initialize the signal matrix with real-time firmware data
 	matrix := models.SignalMatrix{
 		DeviceID:   deviceID,
 		MSISDN:     msisdn,
@@ -30,43 +43,57 @@ func (e *Enricher) Process(deviceID string, msisdn string, battery int, temp flo
 		Accel:      accel,
 	}
 
-	// WaitGroup to do 2 Nokia calls at the exact same time
+	// 1. Thread-safe cache lookup
+	e.mu.RLock()
+	state, exists := e.cache[deviceID]
+	e.mu.RUnlock()
+
+	// 2. Determine if network-layer refresh is required (2-minute cadence)
+	if !exists || time.Since(state.lastFetch) > (2*time.Minute) {
+		e.refreshNetworkSignals(context.Background(), &matrix)
+
+		// 3. Update cache with fresh network results
+		e.mu.Lock()
+		e.cache[deviceID] = &networkState{
+			lat:        matrix.Lat,
+			lon:        matrix.Lon,
+			simSwapped: matrix.SimSwapped,
+			lastFetch:  time.Now(),
+		}
+		e.mu.Unlock()
+	} else {
+		// 4. Use cached network data for continuity
+		matrix.Lat = state.lat
+		matrix.Lon = state.lon
+		matrix.SimSwapped = state.simSwapped
+	}
+
+	e.logTelemetry(&matrix)
+}
+
+// refreshNetworkSignals executes parallel calls to Nokia APIs to minimize total latency.
+func (e *Enricher) refreshNetworkSignals(ctx context.Context, matrix *models.SignalMatrix) {
 	var wg sync.WaitGroup
 	wg.Add(2)
 
-	// Background Task A: Get Location
 	go func() {
 		defer wg.Done()
-		loc, err := e.nokiaClient.GetDeviceLocation(ctx, msisdn)
-		if err == nil && loc != nil {
-			matrix.Lat = loc.Lat
-			matrix.Lon = loc.Lon
+		if loc, err := e.nokiaClient.GetDeviceLocation(ctx, matrix.MSISDN); err == nil {
+			matrix.Lat = loc.Area.Center.Lat
+			matrix.Lon = loc.Area.Center.Lon
 		}
 	}()
 
-	// Background Task B: Check SIM Swap
 	go func() {
 		defer wg.Done()
-		swap, err := e.nokiaClient.CheckSIMSwap(ctx, msisdn)
-		if err == nil && swap != nil {
+		if swap, err := e.nokiaClient.CheckSIMSwap(ctx, matrix.MSISDN); err == nil {
 			matrix.SimSwapped = swap.Swapped
 		}
 	}()
 
-	// 3. Wait for both Nokia calls to finish
 	wg.Wait()
+}
 
-	// CREATE A TABULAR VIEW
-	// Using %-8s and %-6.1f ensures columns stay aligned even if numbers change
-	summary := fmt.Sprintf(
-		"ID: %-8s | TEMP: %4.1f°C | ACCEL: %-3d | BATT: %3d%% | LAT: %-8.4f | STOLEN: %-5v",
-		matrix.DeviceID,
-		matrix.Temp,
-		matrix.Accel,
-		matrix.BatteryPct,
-		matrix.Lat,
-		matrix.SimSwapped,
-	)
-
-	config.LogSuccess("ENRICH", summary)
+func (e *Enricher) logTelemetry(m *models.SignalMatrix) {
+	config.LogEnrich(m.DeviceID, m.Temp, m.Accel, m.BatteryPct, m.Lat, m.Lon, m.SimSwapped)
 }

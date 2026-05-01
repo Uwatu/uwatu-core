@@ -13,23 +13,36 @@ type SIMSwapResult struct {
 	Swapped bool `json:"swapped"`
 }
 
+// CheckSIMSwap queries the Network as Code API to detect unauthorized SIM card movement.
 func (c *Client) CheckSIMSwap(ctx context.Context, msisdn string) (*SIMSwapResult, error) {
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	c.rateLimiter.Wait(ctx)
 
-	body := []byte(fmt.Sprintf(`{"phoneNumber":"%s", "maxAge": 24}`, msisdn))
+	if err := c.rateLimiter.Wait(ctx); err != nil {
+		return nil, err
+	}
 
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/sim-swap/v0/check", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
+	requestBody, _ := json.Marshal(map[string]interface{}{
+		"phoneNumber": msisdn,
+		"maxAge":      24, // Check for swaps within the last 24 hours
+	})
 
-	resp, err := c.httpClient.Do(req)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/sim-swap/v0/check", bytes.NewReader(requestBody))
+
+	resp, err := c.DoRequest(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("nokia sim-swap error: %d", resp.StatusCode)
+	}
+
 	var result SIMSwapResult
-	json.NewDecoder(resp.Body).Decode(&result)
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+
 	return &result, nil
 }

@@ -36,26 +36,41 @@ func (h *Handler) StartMQTT(brokerURL string, clientID string) {
 }
 
 func (h *Handler) handleMessage(client mqtt.Client, msg mqtt.Message) {
-	// Unpack the cow's JSON message
 	var payload map[string]interface{}
 	if err := json.Unmarshal(msg.Payload(), &payload); err != nil {
+		config.LogError("MQTT", "Failed to decode JSON payload")
 		return
 	}
 
-	// Extract the important bits
+	// 1. Get the Top-Level fields
 	deviceID, _ := payload["device_id"].(string)
 	msisdn, _ := payload["msisdn"].(string)
 
-	// Battery is tricky in JSON, it comes through as a float64
-	batteryFloat, _ := payload["battery_pct"].(float64)
-	battery := int(batteryFloat)
+	// 2. Open the "firmware_payload" sub-folder
+	// In Go, we have to "type assert" it to another map
+	firmware, ok := payload["firmware_payload"].(map[string]interface{})
 
-	temp, _ := payload["body_temp_c"].(float64)
-	accel, _ := payload["accel_magnitude"].(float64)
+	// Create variables to hold our data (default to 0)
+	var temp float64
+	var accel int
+	var battery int
 
-	// Log the receipt with a clean string
+	if ok {
+		// 3. Extract the data from INSIDE the firmware_payload
+		// Note: JSON numbers are ALWAYS float64 in Go, so we convert them
+		temp, _ = firmware["body_temp_c"].(float64)
+
+		accelVal, _ := firmware["accel_magnitude"].(float64)
+		accel = int(accelVal)
+
+		battVal, _ := firmware["battery_pct"].(float64)
+		battery = int(battVal)
+	} else {
+		config.LogError("INGEST", "Message arrived but firmware_payload was missing!")
+	}
+
 	config.LogInfo("INGEST", fmt.Sprintf("Tag: %s | Signal: Recv", deviceID))
 
-	h.enricher.Process(deviceID, msisdn, int(battery), temp, int(accel))
-
+	// 4. Pass the data to the enricher
+	h.enricher.Process(deviceID, msisdn, battery, temp, accel)
 }
