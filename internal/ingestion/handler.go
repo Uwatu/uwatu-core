@@ -2,6 +2,7 @@ package ingestion
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
@@ -48,9 +49,13 @@ func (h *Handler) handleMessage(client mqtt.Client, msg mqtt.Message) {
 	// Battery is tricky in JSON, it comes through as a float64
 	batteryFloat, _ := payload["battery_pct"].(float64)
 	battery := int(batteryFloat)
-	
-	config.LogInfo("INGEST", "Ping received: "+deviceID+" ("+msisdn+")")
 
-	// Give the data to the Enricher to ask Nokia about it!
-	h.enricher.Process(deviceID, msisdn, battery)
+	temp, _ := payload["body_temp_c"].(float64)
+	accel, _ := payload["accel_magnitude"].(float64)
+
+	// Log the receipt with a clean string
+	config.LogInfo("INGEST", fmt.Sprintf("Tag: %s | Signal: Recv", deviceID))
+
+	h.enricher.Process(deviceID, msisdn, int(battery), temp, int(accel))
+
 }

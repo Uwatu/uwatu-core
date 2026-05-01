@@ -19,17 +19,18 @@ func NewEnricher(nc *nokia.Client) *Enricher {
 }
 
 // Process fires the Nokia APIs and builds the final Matrix
-func (e *Enricher) Process(deviceID string, msisdn string, battery int) {
+func (e *Enricher) Process(deviceID string, msisdn string, battery int, temp float64, accel int) {
 	ctx := context.Background()
 
-	// 1. Start building the package
 	matrix := models.SignalMatrix{
 		DeviceID:   deviceID,
 		MSISDN:     msisdn,
 		BatteryPct: battery,
+		Temp:       temp,
+		Accel:      accel,
 	}
 
-	// 2. We use a WaitGroup to do 2 Nokia calls at the exact same time
+	// WaitGroup to do 2 Nokia calls at the exact same time
 	var wg sync.WaitGroup
 	wg.Add(2)
 
@@ -55,9 +56,17 @@ func (e *Enricher) Process(deviceID string, msisdn string, battery int) {
 	// 3. Wait for both Nokia calls to finish
 	wg.Wait()
 
-	// 4. Print the result!
-	summary := fmt.Sprintf("ID: %s | Lat: %.4f | Stolen: %v", matrix.DeviceID, matrix.Lat, matrix.SimSwapped)
-	config.LogSuccess("ENRICH", summary)
+	// CREATE A TABULAR VIEW
+	// Using %-8s and %-6.1f ensures columns stay aligned even if numbers change
+	summary := fmt.Sprintf(
+		"ID: %-8s | TEMP: %4.1f°C | ACCEL: %-3d | BATT: %3d%% | LAT: %-8.4f | STOLEN: %-5v",
+		matrix.DeviceID,
+		matrix.Temp,
+		matrix.Accel,
+		matrix.BatteryPct,
+		matrix.Lat,
+		matrix.SimSwapped,
+	)
 
-	// mpheles alert takes over
+	config.LogSuccess("ENRICH", summary)
 }
