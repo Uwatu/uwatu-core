@@ -2,9 +2,10 @@ package ingestion
 
 import (
 	"context"
-	"log"
+	"fmt"
 	"sync"
 
+	"github.com/uwatu/uwatu-core/internal/config"
 	"github.com/uwatu/uwatu-core/internal/models" // <-- Check your go.mod for the real path!
 	"github.com/uwatu/uwatu-core/internal/nokia"
 )
@@ -55,8 +56,8 @@ func (e *Enricher) Process(deviceID string, msisdn string, battery int) {
 	wg.Wait()
 
 	// 4. Print the result!
-	log.Printf("✅ [ENRICHED] Cow %s -> Lat: %f, Lon: %f, Stolen: %v",
-		matrix.DeviceID, matrix.Lat, matrix.Lon, matrix.SimSwapped)
+	summary := fmt.Sprintf("ID: %s | Lat: %.4f | Stolen: %v", matrix.DeviceID, matrix.Lat, matrix.SimSwapped)
+	config.LogSuccess("ENRICH", summary)
 
-	// LATER: Here you will hand 'matrix' over to Mphele's alert code.
+	// mpheles alert takes over
 }
