@@ -5,6 +5,7 @@ import (
 	"log"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
+	"github.com/uwatu/uwatu-core/internal/config"
 )
 
 type Handler struct {
@@ -47,8 +48,8 @@ func (h *Handler) handleMessage(client mqtt.Client, msg mqtt.Message) {
 	// Battery is tricky in JSON, it comes through as a float64
 	batteryFloat, _ := payload["battery_pct"].(float64)
 	battery := int(batteryFloat)
-
-	log.Printf("[RECEIVED] Ping from %s (%s)", deviceID, msisdn)
+	
+	config.LogInfo("INGEST", "Ping received: "+deviceID+" ("+msisdn+")")
 
 	// Give the data to the Enricher to ask Nokia about it!
 	h.enricher.Process(deviceID, msisdn, battery)

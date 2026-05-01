@@ -9,4 +9,5 @@ type SignalMatrix struct {
 	Lon             float64
 	SimSwapped      bool
 	DeviceReachable string
+	BatteryPct      int
 }
