@@ -6,7 +6,7 @@ import (
 	"sync"
 
 	"github.com/uwatu/uwatu-core/internal/config"
-	"github.com/uwatu/uwatu-core/internal/models" // <-- Check your go.mod for the real path!
+	"github.com/uwatu/uwatu-core/internal/models"
 	"github.com/uwatu/uwatu-core/internal/nokia"
 )
 
