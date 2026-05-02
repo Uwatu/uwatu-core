@@ -1,11 +1,20 @@
 package models
 
 type NokiaSignals struct {
-	Lat                float64 `json:"lat"`
-	Lon                float64 `json:"lon"`
-	SimSwapped         bool    `json:"sim_swapped"`
-	DeviceReachable    string  `json:"device_reachable"`
-	DeviceConnectivity string  `json:"device_connectivity"` // signal api
+	// location api
+	Lat float64 `json:"lat"`
+	Lon float64 `json:"lon"`
+
+	// sim swap api
+	SimSwapped bool `json:"sim_swapped"`
+
+	// dev status api
+	DeviceReachable    string `json:"device_reachable"`
+	DeviceConnectivity string `json:"device_connectivity"` // signal api
+
+	// roaming api (for is cross border)
+	Roaming        bool `json:"roaming"`
+	RoamingCountry int  `json:"roaming_country"`
 }
 
 type Baseline struct {
