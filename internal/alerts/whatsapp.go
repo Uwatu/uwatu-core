@@ -46,7 +46,12 @@ func SendWhatsApp(apiKey string, username string, from string, to string, messag
 	if err != nil {
 		return fmt.Errorf("failed to execute whatsapp request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func(Body io.ReadCloser) {
+		err := Body.Close()
+		if err != nil {
+
+		}
+	}(resp.Body)
 
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(resp.Body)
