@@ -79,8 +79,9 @@ func (e *Enricher) Process(deviceID, msisdn string, telemetry models.TagTelemetr
 // continues with whatever was returned (zero values on error).
 func (e *Enricher) refreshNetworkSignals(ctx context.Context, matrix *models.SignalMatrix) {
 	var wg sync.WaitGroup
-	wg.Add(2)
+	wg.Add(3) // doing three api calls (swap, location, device status)
 
+	// LOCATION API
 	go func() {
 		defer wg.Done()
 		loc, err := e.nokiaClient.GetDeviceLocation(ctx, matrix.MSISDN)
@@ -90,9 +91,9 @@ func (e *Enricher) refreshNetworkSignals(ctx context.Context, matrix *models.Sig
 		}
 		matrix.Nokia.Lat = loc.Area.Center.Lat
 		matrix.Nokia.Lon = loc.Area.Center.Lon
-		// loc.Area.Radius (uncertainty) is available but not stored here yet.
 	}()
 
+	// SIM SWAP API
 	go func() {
 		defer wg.Done()
 		swap, err := e.nokiaClient.CheckSIMSwap(ctx, matrix.MSISDN)
@@ -101,6 +102,26 @@ func (e *Enricher) refreshNetworkSignals(ctx context.Context, matrix *models.Sig
 			return
 		}
 		matrix.Nokia.SimSwapped = swap.Swapped
+	}()
+
+	// DEVICE STATUS API
+	go func() {
+		defer wg.Done()
+		status, err := e.nokiaClient.GetDeviceStatus(ctx, matrix.MSISDN)
+		if err != nil {
+			config.LogError("NOKIA_STATUS", err.Error())
+			return
+		}
+		// Map reachability to a descriptive string
+		if status.Reachable {
+			if len(status.Connectivity) > 0 && status.Connectivity[0] == "SMS" {
+				matrix.Nokia.DeviceReachable = "REACHABLE_SMS"
+			} else {
+				matrix.Nokia.DeviceReachable = "REACHABLE_DATA"
+			}
+		} else {
+			matrix.Nokia.DeviceReachable = "UNREACHABLE"
+		}
 	}()
 
 	wg.Wait()
