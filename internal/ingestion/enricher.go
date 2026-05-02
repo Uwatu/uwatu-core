@@ -21,6 +21,8 @@ type networkState struct {
 	roamingCountry  int
 	deviceReachable string
 	congestionLevel string
+	qodSessionID    string
+	sliceID         string
 	lastFetch       time.Time
 }
 
@@ -50,16 +52,17 @@ func (e *Enricher) Process(deviceID, msisdn string, telemetry models.TagTelemetr
 		Telemetry: telemetry,
 	}
 
-	// 1. Thread‑safe read from cache
 	e.mu.RLock()
 	state, exists := e.cache[deviceID]
 	e.mu.RUnlock()
 
-	// 2. Refresh network signals if needed (every 2 minutes)
 	if !exists || time.Since(state.lastFetch) > 2*time.Minute {
+		if exists {
+			matrix.Nokia.QoDSessionID = state.qodSessionID
+			matrix.Nokia.SliceID = state.sliceID
+		}
 		e.refreshNetworkSignals(context.Background(), &matrix)
 
-		// 3. Update cache with fresh values
 		e.mu.Lock()
 		e.cache[deviceID] = &networkState{
 			lat:             matrix.Nokia.Lat,
@@ -70,11 +73,12 @@ func (e *Enricher) Process(deviceID, msisdn string, telemetry models.TagTelemetr
 			roamingCountry:  matrix.Nokia.RoamingCountry,
 			deviceReachable: matrix.Nokia.DeviceReachable,
 			congestionLevel: matrix.Nokia.CongestionLevel,
+			qodSessionID:    matrix.Nokia.QoDSessionID,
+			sliceID:         matrix.Nokia.SliceID,
 			lastFetch:       time.Now(),
 		}
 		e.mu.Unlock()
 	} else {
-		// Use cached network state
 		matrix.Nokia.Lat = state.lat
 		matrix.Nokia.Lon = state.lon
 		matrix.Nokia.SimSwapped = state.simSwapped
@@ -83,6 +87,8 @@ func (e *Enricher) Process(deviceID, msisdn string, telemetry models.TagTelemetr
 		matrix.Nokia.RoamingCountry = state.roamingCountry
 		matrix.Nokia.DeviceReachable = state.deviceReachable
 		matrix.Nokia.CongestionLevel = state.congestionLevel
+		matrix.Nokia.QoDSessionID = state.qodSessionID
+		matrix.Nokia.SliceID = state.sliceID
 	}
 
 	e.logTelemetry(&matrix)
@@ -93,9 +99,17 @@ func (e *Enricher) Process(deviceID, msisdn string, telemetry models.TagTelemetr
 // continues with whatever was returned (zero values on error).
 func (e *Enricher) refreshNetworkSignals(ctx context.Context, matrix *models.SignalMatrix) {
 	var wg sync.WaitGroup
-	wg.Add(5)
+	wg.Add(7)
 
-	delays := []time.Duration{0, 150 * time.Millisecond, 300 * time.Millisecond, 450 * time.Millisecond, 600 * time.Millisecond}
+	delays := []time.Duration{
+		0,
+		150 * time.Millisecond,
+		300 * time.Millisecond,
+		450 * time.Millisecond,
+		600 * time.Millisecond,
+		750 * time.Millisecond,
+		900 * time.Millisecond,
+	}
 
 	// 1. Location
 	go func() {
@@ -142,7 +156,7 @@ func (e *Enricher) refreshNetworkSignals(ctx context.Context, matrix *models.Sig
 		}
 	}()
 
-	// 4. Roaming Status
+	// 4. Roaming
 	go func() {
 		defer wg.Done()
 		time.Sleep(delays[3])
@@ -168,10 +182,39 @@ func (e *Enricher) refreshNetworkSignals(ctx context.Context, matrix *models.Sig
 		matrix.Nokia.DeviceSwapped = devSwap.Swapped
 	}()
 
-	wg.Wait()
+	// 6. QoD (only if no active session)
+	go func() {
+		defer wg.Done()
+		time.Sleep(delays[5])
+		if matrix.Nokia.QoDSessionID != "" {
+			return
+		}
+		session, err := e.nokiaClient.CreateQoDSession(ctx, matrix.MSISDN, "DOWNLINK_M_UPLINK_L", 60)
+		if err != nil {
+			config.LogError("NOKIA_QOD", err.Error())
+			return
+		}
+		matrix.Nokia.QoDSessionID = session.SessionID
+		config.LogInfo("NOKIA_QOD", fmt.Sprintf("Session created: %s", session.SessionID))
+	}()
 
-	// Stub Congestion Insights until a webhook receiver is implemented.
-	// Real integration will push updates; for now we assume normal conditions.
+	// 7. Slicing (only if no active slice)
+	go func() {
+		defer wg.Done()
+		time.Sleep(delays[6])
+		if matrix.Nokia.SliceID != "" {
+			return
+		}
+		slice, err := e.nokiaClient.CreateNetworkSlice(ctx, matrix.MSISDN)
+		if err != nil {
+			config.LogError("NOKIA_SLICE", err.Error())
+			return
+		}
+		matrix.Nokia.SliceID = slice.Name
+		config.LogInfo("NOKIA_SLICE", fmt.Sprintf("Slice created: %s (state: %s)", slice.Name, slice.State))
+	}()
+
+	wg.Wait()
 	matrix.Nokia.CongestionLevel = "Low"
 }
 
@@ -188,6 +231,6 @@ func (e *Enricher) logTelemetry(m *models.SignalMatrix) {
 		m.Nokia.DeviceSwapped,
 		m.Nokia.Roaming,
 		m.Nokia.DeviceReachable,
-		m.Nokia.CongestionLevel, // will be empty until real integration
+		m.Nokia.CongestionLevel,
 	)
 }
