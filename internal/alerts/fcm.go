@@ -3,6 +3,7 @@ package alerts
 import (
 	"context"
 	"fmt"
+	"time"
 
 	firebase "firebase.google.com/go/v4"
 	"firebase.google.com/go/v4/messaging"
@@ -31,16 +32,26 @@ func InitializeFCM(projectID string) (*messaging.Client, error) {
 
 // SendPushNotification sends a rich push alert to a specific smartphone.
 func SendPushNotification(client *messaging.Client, fcmToken string, title string, body string) error {
-	// A Context controls the timeout and cancellation of the request
-	ctx := context.Background()
 
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Construct the Firebase Message payload with Android High Priority
 	message := &messaging.Message{
-		Token:        fcmToken,
-		Notification: &messaging.Notification{Title: title, Body: body},
+		Token: fcmToken,
+		Notification: &messaging.Notification{
+			Title: title,
+			Body:  body,
+		},
+		Android: &messaging.AndroidConfig{Priority: "high"},
 	}
 
+	// Send the message using the client
 	_, err := client.Send(ctx, message)
 	if err != nil {
+		if messaging.IsUnregistered(err) {
+			return fmt.Errorf("token_expired")
+		}
 		return fmt.Errorf("error sending fcm message: %v", err)
 	}
 
