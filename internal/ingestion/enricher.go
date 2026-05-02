@@ -10,8 +10,7 @@ import (
 	"github.com/uwatu/uwatu-core/internal/nokia"
 )
 
-// networkState stores the last retrieved data from Nokia to prevent
-// unnecessary API consumption while maintaining data continuity.
+// networkState stores the last retrieved Nokia data for a device.
 type networkState struct {
 	lat        float64
 	lon        float64
@@ -19,12 +18,15 @@ type networkState struct {
 	lastFetch  time.Time
 }
 
+// Enricher coordinates the fusion of real-time firmware telemetry with
+// Nokia network-layer signals, using a two‑minute cache to limit API calls.
 type Enricher struct {
 	nokiaClient *nokia.Client
 	mu          sync.RWMutex
 	cache       map[string]*networkState
 }
 
+// NewEnricher creates a new Enricher with an empty cache.
 func NewEnricher(nc *nokia.Client) *Enricher {
 	return &Enricher{
 		nokiaClient: nc,
@@ -32,68 +34,87 @@ func NewEnricher(nc *nokia.Client) *Enricher {
 	}
 }
 
-// Process coordinates the fusion of real-time sensor data with periodic network-layer signals.
-func (e *Enricher) Process(deviceID string, msisdn string, battery int, temp float64, accel int) {
-	// Initialize the signal matrix with real-time firmware data
+// Process accepts a device ID, MSISDN and the already‑parsed firmware telemetry,
+// constructs a SignalMatrix, refreshes Nokia data if the cache is stale, and
+// logs the enriched telemetry to the terminal.
+func (e *Enricher) Process(deviceID, msisdn string, telemetry models.TagTelemetry) {
 	matrix := models.SignalMatrix{
-		DeviceID:   deviceID,
-		MSISDN:     msisdn,
-		BatteryPct: battery,
-		Temp:       temp,
-		Accel:      accel,
+		DeviceID:  deviceID,
+		MSISDN:    msisdn,
+		Telemetry: telemetry,
+		// FarmID, AnimalID, Baseline and Context will be populated
+		// later by the farm registry and intelligence layer.
 	}
 
-	// 1. Thread-safe cache lookup
+	// 1. Thread‑safe read from cache
 	e.mu.RLock()
 	state, exists := e.cache[deviceID]
 	e.mu.RUnlock()
 
-	// 2. Determine if network-layer refresh is required (2-minute cadence)
-	if !exists || time.Since(state.lastFetch) > (2*time.Minute) {
+	// 2. Refresh network signals if needed (every 2 minutes)
+	if !exists || time.Since(state.lastFetch) > 2*time.Minute {
 		e.refreshNetworkSignals(context.Background(), &matrix)
 
-		// 3. Update cache with fresh network results
+		// 3. Update cache with fresh values (or zero if calls failed)
 		e.mu.Lock()
 		e.cache[deviceID] = &networkState{
-			lat:        matrix.Lat,
-			lon:        matrix.Lon,
-			simSwapped: matrix.SimSwapped,
+			lat:        matrix.Nokia.Lat,
+			lon:        matrix.Nokia.Lon,
+			simSwapped: matrix.Nokia.SimSwapped,
 			lastFetch:  time.Now(),
 		}
 		e.mu.Unlock()
 	} else {
-		// 4. Use cached network data for continuity
-		matrix.Lat = state.lat
-		matrix.Lon = state.lon
-		matrix.SimSwapped = state.simSwapped
+		// Use cached network state
+		matrix.Nokia.Lat = state.lat
+		matrix.Nokia.Lon = state.lon
+		matrix.Nokia.SimSwapped = state.simSwapped
 	}
 
 	e.logTelemetry(&matrix)
 }
 
-// refreshNetworkSignals executes parallel calls to Nokia APIs to minimize total latency.
+// refreshNetworkSignals calls the Nokia APIs in parallel and populates
+// the matrix's NokiaSignals field. Failures are logged; the pipeline
+// continues with whatever was returned (zero values on error).
 func (e *Enricher) refreshNetworkSignals(ctx context.Context, matrix *models.SignalMatrix) {
 	var wg sync.WaitGroup
 	wg.Add(2)
 
 	go func() {
 		defer wg.Done()
-		if loc, err := e.nokiaClient.GetDeviceLocation(ctx, matrix.MSISDN); err == nil {
-			matrix.Lat = loc.Area.Center.Lat
-			matrix.Lon = loc.Area.Center.Lon
+		loc, err := e.nokiaClient.GetDeviceLocation(ctx, matrix.MSISDN)
+		if err != nil {
+			config.LogError("NOKIA_LOC", err.Error())
+			return
 		}
+		matrix.Nokia.Lat = loc.Area.Center.Lat
+		matrix.Nokia.Lon = loc.Area.Center.Lon
+		// loc.Area.Radius (uncertainty) is available but not stored here yet.
 	}()
 
 	go func() {
 		defer wg.Done()
-		if swap, err := e.nokiaClient.CheckSIMSwap(ctx, matrix.MSISDN); err == nil {
-			matrix.SimSwapped = swap.Swapped
+		swap, err := e.nokiaClient.CheckSIMSwap(ctx, matrix.MSISDN)
+		if err != nil {
+			config.LogError("NOKIA_SWAP", err.Error())
+			return
 		}
+		matrix.Nokia.SimSwapped = swap.Swapped
 	}()
 
 	wg.Wait()
 }
 
+// logTelemetry prints the enriched telemetry line using the ANSI logger.
 func (e *Enricher) logTelemetry(m *models.SignalMatrix) {
-	config.LogEnrich(m.DeviceID, m.Temp, m.Accel, m.BatteryPct, m.Lat, m.Lon, m.SimSwapped)
+	config.LogEnrich(
+		m.DeviceID,
+		m.Telemetry.BodyTempC,
+		m.Telemetry.AccelMagnitude,
+		m.Telemetry.BatteryPct,
+		m.Nokia.Lat,
+		m.Nokia.Lon,
+		m.Nokia.SimSwapped,
+	)
 }
