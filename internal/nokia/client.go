@@ -23,7 +23,7 @@ func NewClient(apiKey, apiHost, baseURL string) *Client {
 		apiKey:     apiKey,
 		apiHost:    apiHost,
 		// Limit to 1 request every 600ms (roughly 100 per minute)
-		rateLimiter: rate.NewLimiter(rate.Every(time.Minute/100), 1),
+		rateLimiter: rate.NewLimiter(rate.Every(time.Minute/100), 8),
 	}
 
 }
