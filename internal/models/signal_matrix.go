@@ -8,6 +8,9 @@ type NokiaSignals struct {
 	// sim swap api
 	SimSwapped bool `json:"sim_swapped"`
 
+	// device swap api
+	DeviceSwapped bool `json:"device_swapped"`
+
 	// dev status api
 	DeviceReachable    string `json:"device_reachable"`
 	DeviceConnectivity string `json:"device_connectivity"` // signal api
@@ -15,6 +18,9 @@ type NokiaSignals struct {
 	// roaming api (for is cross border)
 	Roaming        bool `json:"roaming"`
 	RoamingCountry int  `json:"roaming_country"`
+
+	// congestion api
+	CongestionLevel string `json:"congestion_level"` // e.g. "Low"
 }
 
 type Baseline struct {
