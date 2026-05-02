@@ -7,16 +7,20 @@ import (
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 	"github.com/uwatu/uwatu-core/internal/config"
+	"github.com/uwatu/uwatu-core/internal/models"
 )
 
+// Handler receives MQTT messages and forwards parsed telemetry to the Enricher.
 type Handler struct {
 	enricher *Enricher
 }
 
+// NewHandler creates a new Handler with a reference to the Enricher.
 func NewHandler(e *Enricher) *Handler {
 	return &Handler{enricher: e}
 }
 
+// StartMQTT connects to the broker and subscribes to the telemetry topic.
 func (h *Handler) StartMQTT(brokerURL string, clientID string) {
 	opts := mqtt.NewClientOptions()
 	opts.AddBroker(brokerURL)
@@ -30,11 +34,13 @@ func (h *Handler) StartMQTT(brokerURL string, clientID string) {
 		log.Fatalf("[FATAL] MQTT Connect failed: %v", token.Error())
 	}
 
-	// Listen to all tags on all farms (+ is a wildcard)
+	// Listen to all tags on all farms
 	client.Subscribe("uwatu/farm/+/tag/+", 1, nil)
 	log.Printf("[INGESTION] Listening on HiveMQ for cow data...")
 }
 
+// handleMessage unpacks the simulator JSON payload, builds a TagTelemetry,
+// and passes it to the Enricher.
 func (h *Handler) handleMessage(client mqtt.Client, msg mqtt.Message) {
 	var payload map[string]interface{}
 	if err := json.Unmarshal(msg.Payload(), &payload); err != nil {
@@ -42,35 +48,31 @@ func (h *Handler) handleMessage(client mqtt.Client, msg mqtt.Message) {
 		return
 	}
 
-	// 1. Get the Top-Level fields
+	// 1. Extract top-level identifiers
 	deviceID, _ := payload["device_id"].(string)
 	msisdn, _ := payload["msisdn"].(string)
 
-	// 2. Open the "firmware_payload" sub-folder
-	// In Go, we have to "type assert" it to another map
-	firmware, ok := payload["firmware_payload"].(map[string]interface{})
-
-	// Create variables to hold our data (default to 0)
-	var temp float64
-	var accel int
-	var battery int
-
-	if ok {
-		// 3. Extract the data from INSIDE the firmware_payload
-		// Note: JSON numbers are ALWAYS float64 in Go, so we convert them
-		temp, _ = firmware["body_temp_c"].(float64)
-
-		accelVal, _ := firmware["accel_magnitude"].(float64)
-		accel = int(accelVal)
-
-		battVal, _ := firmware["battery_pct"].(float64)
-		battery = int(battVal)
+	// 2. Build TagTelemetry from the nested firmware_payload
+	telemetry := models.TagTelemetry{}
+	if firmware, ok := payload["firmware_payload"].(map[string]interface{}); ok {
+		// JSON numbers are float64 in Go – convert to the correct type
+		if v, ok := firmware["body_temp_c"].(float64); ok {
+			telemetry.BodyTempC = v
+		}
+		if v, ok := firmware["accel_magnitude"].(float64); ok {
+			telemetry.AccelMagnitude = int(v)
+		}
+		if v, ok := firmware["battery_pct"].(float64); ok {
+			telemetry.BatteryPct = int(v)
+		}
+		// Additional fields (battery_mv, rssi_dbm, cell_id, etc.) can be
+		// mapped as the simulator begins to populate them.
 	} else {
 		config.LogError("INGEST", "Message arrived but firmware_payload was missing!")
 	}
 
 	config.LogInfo("INGEST", fmt.Sprintf("Tag: %s | Signal: Recv", deviceID))
 
-	// 4. Pass the data to the enricher
-	h.enricher.Process(deviceID, msisdn, battery, temp, accel)
+	// 3. Hand over to the enricher
+	h.enricher.Process(deviceID, msisdn, telemetry)
 }
