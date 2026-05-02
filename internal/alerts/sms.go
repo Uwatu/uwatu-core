@@ -29,8 +29,7 @@ func SendSMS(apiKey string, username string, to string, message string) error {
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	resp, err := AlertHTTPClient.Do(req)
 
 	if err != nil {
 		return fmt.Errorf("failed to send sms request: %w", err)

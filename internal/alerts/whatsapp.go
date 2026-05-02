@@ -41,8 +41,7 @@ func SendWhatsApp(apiKey string, username string, from string, to string, messag
 	whatsAppRequest.Header.Set("Content-Type", "application/json")
 	whatsAppRequest.Header.Set("apiKey", apiKey)
 
-	client := &http.Client{}
-	resp, err := client.Do(whatsAppRequest)
+	resp, err := AlertHTTPClient.Do(whatsAppRequest)
 	if err != nil {
 		return fmt.Errorf("failed to execute whatsapp request: %w", err)
 	}
