@@ -2,6 +2,7 @@ package ingestion
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -79,11 +80,14 @@ func (e *Enricher) Process(deviceID, msisdn string, telemetry models.TagTelemetr
 // continues with whatever was returned (zero values on error).
 func (e *Enricher) refreshNetworkSignals(ctx context.Context, matrix *models.SignalMatrix) {
 	var wg sync.WaitGroup
-	wg.Add(4) // doing 4 api calls (swap, location, device status, roaming)
+	wg.Add(5)
 
-	// LOCATION API
+	delays := []time.Duration{0, 150 * time.Millisecond, 300 * time.Millisecond, 450 * time.Millisecond, 600 * time.Millisecond}
+
+	// 1. Location
 	go func() {
 		defer wg.Done()
+		time.Sleep(delays[0])
 		loc, err := e.nokiaClient.GetDeviceLocation(ctx, matrix.MSISDN)
 		if err != nil {
 			config.LogError("NOKIA_LOC", err.Error())
@@ -93,9 +97,10 @@ func (e *Enricher) refreshNetworkSignals(ctx context.Context, matrix *models.Sig
 		matrix.Nokia.Lon = loc.Area.Center.Lon
 	}()
 
-	// SIM SWAP API
+	// 2. SIM Swap
 	go func() {
 		defer wg.Done()
+		time.Sleep(delays[1])
 		swap, err := e.nokiaClient.CheckSIMSwap(ctx, matrix.MSISDN)
 		if err != nil {
 			config.LogError("NOKIA_SWAP", err.Error())
@@ -104,15 +109,15 @@ func (e *Enricher) refreshNetworkSignals(ctx context.Context, matrix *models.Sig
 		matrix.Nokia.SimSwapped = swap.Swapped
 	}()
 
-	// DEVICE STATUS API
+	// 3. Device Reachability
 	go func() {
 		defer wg.Done()
+		time.Sleep(delays[2])
 		status, err := e.nokiaClient.GetDeviceStatus(ctx, matrix.MSISDN)
 		if err != nil {
 			config.LogError("NOKIA_STATUS", err.Error())
 			return
 		}
-		// Map reachability to a descriptive string
 		if status.Reachable {
 			if len(status.Connectivity) > 0 && status.Connectivity[0] == "SMS" {
 				matrix.Nokia.DeviceReachable = "REACHABLE_SMS"
@@ -124,11 +129,10 @@ func (e *Enricher) refreshNetworkSignals(ctx context.Context, matrix *models.Sig
 		}
 	}()
 
-	// extra apis (for as much data as possible)
-
-	// roaming
+	// 4. Roaming Status
 	go func() {
 		defer wg.Done()
+		time.Sleep(delays[3])
 		roam, err := e.nokiaClient.GetRoamingStatus(ctx, matrix.MSISDN)
 		if err != nil {
 			config.LogError("NOKIA_ROAM", err.Error())
@@ -136,9 +140,26 @@ func (e *Enricher) refreshNetworkSignals(ctx context.Context, matrix *models.Sig
 		}
 		matrix.Nokia.Roaming = roam.Roaming
 		matrix.Nokia.RoamingCountry = roam.CountryCode
+		config.LogInfo("NOKIA_ROAM", fmt.Sprintf("Roaming: %t | Country: %d", roam.Roaming, roam.CountryCode))
+	}()
+
+	// 5. Device Swap
+	go func() {
+		defer wg.Done()
+		time.Sleep(delays[4])
+		devSwap, err := e.nokiaClient.CheckDeviceSwap(ctx, matrix.MSISDN, 120)
+		if err != nil {
+			config.LogError("NOKIA_DEVSWAP", err.Error())
+			return
+		}
+		matrix.Nokia.DeviceSwapped = devSwap.Swapped
 	}()
 
 	wg.Wait()
+
+	// Stub Congestion Insights until a webhook receiver is implemented.
+	// Real integration will push updates; for now we assume normal conditions.
+	matrix.Nokia.CongestionLevel = "Low"
 }
 
 // logTelemetry prints the enriched telemetry line using the ANSI logger.
@@ -151,5 +172,9 @@ func (e *Enricher) logTelemetry(m *models.SignalMatrix) {
 		m.Nokia.Lat,
 		m.Nokia.Lon,
 		m.Nokia.SimSwapped,
+		m.Nokia.DeviceSwapped,
+		m.Nokia.Roaming,
+		m.Nokia.DeviceReachable,
+		m.Nokia.CongestionLevel, // will be empty until real integration
 	)
 }
