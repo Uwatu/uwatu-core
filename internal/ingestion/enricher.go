@@ -79,7 +79,7 @@ func (e *Enricher) Process(deviceID, msisdn string, telemetry models.TagTelemetr
 // continues with whatever was returned (zero values on error).
 func (e *Enricher) refreshNetworkSignals(ctx context.Context, matrix *models.SignalMatrix) {
 	var wg sync.WaitGroup
-	wg.Add(3) // doing three api calls (swap, location, device status)
+	wg.Add(4) // doing 4 api calls (swap, location, device status, roaming)
 
 	// LOCATION API
 	go func() {
@@ -122,6 +122,20 @@ func (e *Enricher) refreshNetworkSignals(ctx context.Context, matrix *models.Sig
 		} else {
 			matrix.Nokia.DeviceReachable = "UNREACHABLE"
 		}
+	}()
+
+	// extra apis (for as much data as possible)
+
+	// roaming
+	go func() {
+		defer wg.Done()
+		roam, err := e.nokiaClient.GetRoamingStatus(ctx, matrix.MSISDN)
+		if err != nil {
+			config.LogError("NOKIA_ROAM", err.Error())
+			return
+		}
+		matrix.Nokia.Roaming = roam.Roaming
+		matrix.Nokia.RoamingCountry = roam.CountryCode
 	}()
 
 	wg.Wait()
