@@ -13,10 +13,15 @@ import (
 
 // networkState stores the last retrieved Nokia data for a device.
 type networkState struct {
-	lat        float64
-	lon        float64
-	simSwapped bool
-	lastFetch  time.Time
+	lat             float64
+	lon             float64
+	simSwapped      bool
+	deviceSwapped   bool
+	roaming         bool
+	roamingCountry  int
+	deviceReachable string
+	congestionLevel string
+	lastFetch       time.Time
 }
 
 // Enricher coordinates the fusion of real-time firmware telemetry with
@@ -43,8 +48,6 @@ func (e *Enricher) Process(deviceID, msisdn string, telemetry models.TagTelemetr
 		DeviceID:  deviceID,
 		MSISDN:    msisdn,
 		Telemetry: telemetry,
-		// FarmID, AnimalID, Baseline and Context will be populated
-		// later by the farm registry and intelligence layer.
 	}
 
 	// 1. Thread‑safe read from cache
@@ -56,13 +59,18 @@ func (e *Enricher) Process(deviceID, msisdn string, telemetry models.TagTelemetr
 	if !exists || time.Since(state.lastFetch) > 2*time.Minute {
 		e.refreshNetworkSignals(context.Background(), &matrix)
 
-		// 3. Update cache with fresh values (or zero if calls failed)
+		// 3. Update cache with fresh values
 		e.mu.Lock()
 		e.cache[deviceID] = &networkState{
-			lat:        matrix.Nokia.Lat,
-			lon:        matrix.Nokia.Lon,
-			simSwapped: matrix.Nokia.SimSwapped,
-			lastFetch:  time.Now(),
+			lat:             matrix.Nokia.Lat,
+			lon:             matrix.Nokia.Lon,
+			simSwapped:      matrix.Nokia.SimSwapped,
+			deviceSwapped:   matrix.Nokia.DeviceSwapped,
+			roaming:         matrix.Nokia.Roaming,
+			roamingCountry:  matrix.Nokia.RoamingCountry,
+			deviceReachable: matrix.Nokia.DeviceReachable,
+			congestionLevel: matrix.Nokia.CongestionLevel,
+			lastFetch:       time.Now(),
 		}
 		e.mu.Unlock()
 	} else {
@@ -70,6 +78,11 @@ func (e *Enricher) Process(deviceID, msisdn string, telemetry models.TagTelemetr
 		matrix.Nokia.Lat = state.lat
 		matrix.Nokia.Lon = state.lon
 		matrix.Nokia.SimSwapped = state.simSwapped
+		matrix.Nokia.DeviceSwapped = state.deviceSwapped
+		matrix.Nokia.Roaming = state.roaming
+		matrix.Nokia.RoamingCountry = state.roamingCountry
+		matrix.Nokia.DeviceReachable = state.deviceReachable
+		matrix.Nokia.CongestionLevel = state.congestionLevel
 	}
 
 	e.logTelemetry(&matrix)
