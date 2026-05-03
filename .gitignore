@@ -30,3 +30,4 @@ go.work.sum
 .vscode/
 *.swp
 stats.sh
+logfile
