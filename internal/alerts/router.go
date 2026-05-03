@@ -9,9 +9,34 @@ import (
 	"github.com/uwatu/uwatu-core/internal/models"
 )
 
-// RouteAlert evaluates the farmer's tier and attempts to deliver the message,
-// cascading down to lower-tier methods if network timeouts or failures occur.
-func RouteAlert(payload models.AlertPayload, fcmClient *messaging.Client, atAPIKey string, atUsername string, atWhatsAppFrom string) error {
+// AlertRouter defines the contract for any router in the system.
+// This interface allows us to easily create mock routers for testing.
+type AlertRouter interface {
+	RouteAlert(payload models.AlertPayload) error
+}
+
+// DefaultAlertRouter is the standard implementation of the AlertRouter.
+// It acts as a dependency container holding all necessary API clients and credentials.
+type DefaultAlertRouter struct {
+	FCMClient      *messaging.Client
+	ATAPIKey       string
+	ATUsername     string
+	ATWhatsAppFrom string
+}
+
+// NewAlertRouter is the constructor function.
+// It runs once during server startup to pack all credentials into the struct.
+func NewAlertRouter(fcmClient *messaging.Client, atAPIKey string, atUsername string, atWhatsAppFrom string) AlertRouter {
+	return &DefaultAlertRouter{
+		FCMClient:      fcmClient,
+		ATAPIKey:       atAPIKey,
+		ATUsername:     atUsername,
+		ATWhatsAppFrom: atWhatsAppFrom,
+	}
+}
+
+// RouteAlert evaluates the farmer's tier and attempts to deliver the message.
+func (r *DefaultAlertRouter) RouteAlert(payload models.AlertPayload) error {
 	phone := payload.Farmer.Phone
 	message := payload.Message
 
@@ -19,17 +44,16 @@ func RouteAlert(payload models.AlertPayload, fcmClient *messaging.Client, atAPIK
 	case 3:
 		if payload.Farmer.FCMToken != nil {
 			token := *payload.Farmer.FCMToken
-			err := SendPushNotification(fcmClient, token, payload.Event.EventType, message)
+			err := SendPushNotification(r.FCMClient, token, payload.Event.EventType, message)
 
 			if err == nil {
 				return nil
 			}
 
 			if err.Error() == "token_expired" {
-				return errors.New("token_expired") // SPECIFIC FAILURE: Tell the main app to delete the token
+				return errors.New("token_expired")
 			}
 
-			// GENERAL FAILURE: Log it, and let it fallthrough to WhatsApp
 			log.Printf("FCM failed for %s: %v. Falling back to WhatsApp...", phone, err)
 		} else {
 			log.Printf("Tier 3 farmer %s has no FCM token. Falling back to WhatsApp...", phone)
@@ -38,18 +62,17 @@ func RouteAlert(payload models.AlertPayload, fcmClient *messaging.Client, atAPIK
 		fallthrough
 
 	case 2:
-		err := SendWhatsApp(atAPIKey, atUsername, atWhatsAppFrom, phone, message)
+		err := SendWhatsApp(r.ATAPIKey, r.ATUsername, r.ATWhatsAppFrom, phone, message)
 		if err == nil {
 			return nil
 		}
 
-		// FAILURE: Log it, and let it fallthrough to SMS
 		log.Printf("WhatsApp failed for %s: %v. Falling back to SMS...", phone, err)
 
 		fallthrough
 
 	case 1:
-		err := SendSMS(atAPIKey, atUsername, phone, message)
+		err := SendSMS(r.ATAPIKey, r.ATUsername, phone, message)
 		if err == nil {
 			return nil
 		}
