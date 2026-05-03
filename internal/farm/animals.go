@@ -100,16 +100,30 @@ func (r *AnimalRegistry) UpdateAnimal(ctx context.Context, a models.Animal) erro
 	return nil
 }
 
-// DeleteAnimal removes an animal from the database.
+// DeleteAnimal removes an animal and cascades the deletion to its assigned tags safely.
 func (r *AnimalRegistry) DeleteAnimal(ctx context.Context, id string) error {
-	query := `
-		DELETE FROM animals 
-		WHERE id = $1
-	`
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
 
-	_, err := r.db.Exec(ctx, query, id)
+	// If tx.Commit() is successful, this Rollback safely does nothing.
+	defer tx.Rollback(ctx)
+
+	deleteTagsQuery := `DELETE FROM tags WHERE animal_id = $1`
+	_, err = tx.Exec(ctx, deleteTagsQuery, id)
+	if err != nil {
+		return fmt.Errorf("failed to delete associated tags for animal %s: %w", id, err)
+	}
+
+	deleteAnimalQuery := `DELETE FROM animals WHERE id = $1`
+	_, err = tx.Exec(ctx, deleteAnimalQuery, id)
 	if err != nil {
 		return fmt.Errorf("failed to delete animal %s: %w", id, err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("failed to commit deletion transaction: %w", err)
 	}
 
 	return nil
