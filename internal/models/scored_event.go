@@ -15,12 +15,3 @@ type AlertPayload struct {
 	Farmer  Farmer
 	Message string
 }
-
-// Dummy Farmer struct until Issue 16 is built
-type Farmer struct {
-	ID         string
-	Phone      string
-	DeviceTier int
-	Locale     string
-	FCMToken   *string
-}
