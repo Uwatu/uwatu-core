@@ -1,8 +1,6 @@
 package alerts
 
 import (
-	"errors"
-	"fmt"
 	"log"
 
 	"firebase.google.com/go/v4/messaging"
@@ -36,49 +34,58 @@ func NewAlertRouter(fcmClient *messaging.Client, atAPIKey string, atUsername str
 }
 
 // RouteAlert evaluates the farmer's tier and attempts to deliver the message.
+// It fires the routing logic as a background goroutine to unblock the hot path.
 func (r *DefaultAlertRouter) RouteAlert(payload models.AlertPayload) error {
-	phone := payload.Farmer.Phone
-	message := payload.Message
 
-	switch payload.Farmer.DeviceTier {
-	case 3:
-		if payload.Farmer.FCMToken != nil {
-			token := *payload.Farmer.FCMToken
-			err := SendPushNotification(r.FCMClient, token, payload.Event.EventType, message)
+	// We pass the payload into the function as 'p' to prevent closure-capture bugs.
+	go func(p models.AlertPayload) {
+		phone := p.Farmer.Phone
+		message := p.Message
+
+		switch p.Farmer.DeviceTier {
+		case 3:
+			if p.Farmer.FCMToken != nil {
+				token := *p.Farmer.FCMToken
+				err := SendPushNotification(r.FCMClient, token, p.Event.EventType, message)
+				if err == nil {
+					return
+				}
+				if err.Error() == "token_expired" {
+					log.Println("Token expired")
+					return
+				}
+				log.Printf("FCM failed for %s: %v. Falling back to WhatsApp...", phone, err)
+			} else {
+				log.Printf("Tier 3 farmer %s has no FCM token. Falling back to WhatsApp...", phone)
+			}
+			fallthrough
+
+		case 2:
+			err := SendWhatsApp(r.ATAPIKey, r.ATUsername, r.ATWhatsAppFrom, phone, message)
 			if err == nil {
-				return nil
+				return
 			}
-			if err.Error() == "token_expired" {
-				return errors.New("token_expired")
+			log.Printf("WhatsApp failed for %s: %v. Falling back to SMS...", phone, err)
+			fallthrough
+
+		case 1:
+			// We skip USSD push because async network-initiated USSD is unreliable/unsupported.
+			log.Printf("Skipping USSD push for Tier 1 farmer %s. Falling back directly to SMS...", phone)
+			fallthrough
+
+		case 0:
+			err := SendSMS(r.ATAPIKey, r.ATUsername, phone, message)
+			if err == nil {
+				return
 			}
-			log.Printf("FCM failed for %s: %v. Falling back to WhatsApp...", phone, err)
-		} else {
-			log.Printf("Tier 3 farmer %s has no FCM token. Falling back to WhatsApp...", phone)
+			log.Printf("CRITICAL: all alert tiers exhausted for farmer %s. Last error: %v", p.Farmer.ID, err)
+			return
+		default:
+			log.Printf("invalid device tier: %d for farmer %s", p.Farmer.DeviceTier, p.Farmer.ID)
+			return
 		}
-		fallthrough
 
-	case 2:
-		err := SendWhatsApp(r.ATAPIKey, r.ATUsername, r.ATWhatsAppFrom, phone, message)
-		if err == nil {
-			return nil
-		}
-		log.Printf("WhatsApp failed for %s: %v. Falling back to SMS...", phone, err)
-		fallthrough
+	}(payload)
 
-	case 1:
-		// We skip USSD push because async network-initiated USSD is unreliable/unsupported.
-		log.Printf("Skipping USSD push for Tier 1 farmer %s. Falling back directly to SMS...", phone)
-		fallthrough
-
-	case 0:
-		err := SendSMS(r.ATAPIKey, r.ATUsername, phone, message)
-		if err == nil {
-			return nil
-		}
-		return fmt.Errorf("CRITICAL: all alert tiers exhausted for farmer %s. Last error: %v", payload.Farmer.ID, err)
-
-	default:
-		return fmt.Errorf("invalid device tier: %d for farmer %s", payload.Farmer.DeviceTier, payload.Farmer.ID)
-	}
-
+	return nil
 }
