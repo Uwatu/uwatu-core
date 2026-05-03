@@ -10,6 +10,7 @@ import (
 
 	"firebase.google.com/go/v4/messaging"
 	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v2/middleware/cors"
 	"github.com/gofiber/websocket/v2"
 	"github.com/uwatu/uwatu-core/internal/alerts"
 	"github.com/uwatu/uwatu-core/internal/config"
@@ -117,6 +118,13 @@ func main() {
 		config.LogInfo("GEOFENCE", fmt.Sprintf("Boundary stored for farm: %s", body.FarmName))
 		return c.JSON(fiber.Map{"status": "ok", "farmName": body.FarmName})
 	})
+
+	app.Use(cors.New(cors.Config{
+		AllowOrigins:     "http://localhost:3000", // frontend origin
+		AllowMethods:     "GET,POST,PUT,DELETE,OPTIONS",
+		AllowHeaders:     "Content-Type,Authorization",
+		AllowCredentials: true,
+	}))
 
 	// ---- WebSocket ----
 	app.Use("/ws", func(c *fiber.Ctx) error {
