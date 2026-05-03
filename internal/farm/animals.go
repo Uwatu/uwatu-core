@@ -65,3 +65,67 @@ func (r *AnimalRegistry) GetAnimalByDeviceID(ctx context.Context, deviceID strin
 
 	return &a, nil
 }
+
+// GetAnimal fetches a specific animal by its ID.
+func (r *AnimalRegistry) GetAnimal(ctx context.Context, id string) (*models.Animal, error) {
+	var a models.Animal
+
+	query := `
+		SELECT id, farm_id, species 
+		FROM animals 
+		WHERE id = $1
+	`
+
+	err := r.db.QueryRow(ctx, query, id).Scan(&a.ID, &a.FarmID, &a.Species)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get animal %s: %w", id, err)
+	}
+
+	return &a, nil
+}
+
+// UpdateAnimal modifies an existing animal's farm assignment or species.
+func (r *AnimalRegistry) UpdateAnimal(ctx context.Context, a models.Animal) error {
+	query := `
+		UPDATE animals 
+		SET farm_id = $2, species = $3 
+		WHERE id = $1
+	`
+
+	_, err := r.db.Exec(ctx, query, a.ID, a.FarmID, a.Species)
+	if err != nil {
+		return fmt.Errorf("failed to update animal %s: %w", a.ID, err)
+	}
+
+	return nil
+}
+
+// DeleteAnimal removes an animal from the database.
+func (r *AnimalRegistry) DeleteAnimal(ctx context.Context, id string) error {
+	query := `
+		DELETE FROM animals 
+		WHERE id = $1
+	`
+
+	_, err := r.db.Exec(ctx, query, id)
+	if err != nil {
+		return fmt.Errorf("failed to delete animal %s: %w", id, err)
+	}
+
+	return nil
+}
+
+// RemoveTag unassigns a specific device tag from its animal.
+func (r *AnimalRegistry) RemoveTag(ctx context.Context, deviceID string) error {
+	query := `
+		DELETE FROM tags 
+		WHERE device_id = $1
+	`
+
+	_, err := r.db.Exec(ctx, query, deviceID)
+	if err != nil {
+		return fmt.Errorf("failed to remove tag %s: %w", deviceID, err)
+	}
+
+	return nil
+}
