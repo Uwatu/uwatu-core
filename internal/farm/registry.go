@@ -95,3 +95,61 @@ func (r *Registry) GetFarm(ctx context.Context, id string) (*models.Farm, error)
 
 	return &f, nil
 }
+
+func (r *Registry) UpdateFarmer(ctx context.Context, f models.Farmer) error {
+	query := `
+		UPDATE farmers 
+		SET name = $2, phone = $3, device_tier = $4, locale = $5, fcm_token = $6 
+		WHERE id = $1
+	`
+
+	_, err := r.db.Exec(ctx, query, f.ID, f.Name, f.Phone, f.DeviceTier, f.Locale, f.FCMToken)
+	if err != nil {
+		return fmt.Errorf("failed to update farmer %s: %w", f.ID, err)
+	}
+
+	return nil
+}
+
+func (r *Registry) DeleteFarmer(ctx context.Context, id string) error {
+	query := `
+		DELETE FROM farmers 
+		WHERE id = $1
+	`
+
+	_, err := r.db.Exec(ctx, query, id)
+	if err != nil {
+		return fmt.Errorf("failed to delete farmer %s: %w", id, err)
+	}
+
+	return nil
+}
+
+func (r *Registry) UpdateFarm(ctx context.Context, f models.Farm) error {
+	query := `
+		UPDATE farms 
+		SET name = $2, dry_season_start = $3, dry_season_end = $4 
+		WHERE id = $1
+	`
+
+	_, err := r.db.Exec(ctx, query, f.ID, f.Name, f.DrySeasonStart, f.DrySeasonEnd)
+	if err != nil {
+		return fmt.Errorf("failed to update farm %s: %w", f.ID, err)
+	}
+
+	return nil
+}
+
+func (r *Registry) DeleteFarm(ctx context.Context, id string) error {
+	query := `
+		DELETE FROM farms 
+		WHERE id = $1
+	`
+
+	_, err := r.db.Exec(ctx, query, id)
+	if err != nil {
+		return fmt.Errorf("failed to delete farm %s: %w", id, err)
+	}
+
+	return nil
+}
