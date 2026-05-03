@@ -45,20 +45,16 @@ func (r *DefaultAlertRouter) RouteAlert(payload models.AlertPayload) error {
 		if payload.Farmer.FCMToken != nil {
 			token := *payload.Farmer.FCMToken
 			err := SendPushNotification(r.FCMClient, token, payload.Event.EventType, message)
-
 			if err == nil {
 				return nil
 			}
-
 			if err.Error() == "token_expired" {
 				return errors.New("token_expired")
 			}
-
 			log.Printf("FCM failed for %s: %v. Falling back to WhatsApp...", phone, err)
 		} else {
 			log.Printf("Tier 3 farmer %s has no FCM token. Falling back to WhatsApp...", phone)
 		}
-
 		fallthrough
 
 	case 2:
@@ -66,23 +62,23 @@ func (r *DefaultAlertRouter) RouteAlert(payload models.AlertPayload) error {
 		if err == nil {
 			return nil
 		}
-
 		log.Printf("WhatsApp failed for %s: %v. Falling back to SMS...", phone, err)
-
 		fallthrough
 
 	case 1:
+		// We skip USSD push because async network-initiated USSD is unreliable/unsupported.
+		log.Printf("Skipping USSD push for Tier 1 farmer %s. Falling back directly to SMS...", phone)
+		fallthrough
+
+	case 0:
 		err := SendSMS(r.ATAPIKey, r.ATUsername, phone, message)
 		if err == nil {
 			return nil
 		}
-
-		// CRITICAL FAILURE
 		return fmt.Errorf("CRITICAL: all alert tiers exhausted for farmer %s. Last error: %v", payload.Farmer.ID, err)
 
 	default:
 		return fmt.Errorf("invalid device tier: %d for farmer %s", payload.Farmer.DeviceTier, payload.Farmer.ID)
 	}
 
-	return nil
 }
