@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/uwatu/uwatu-core/internal/config"
+	"github.com/uwatu/uwatu-core/internal/db"
+	"github.com/uwatu/uwatu-core/internal/decision"
 	"github.com/uwatu/uwatu-core/internal/models"
 	"github.com/uwatu/uwatu-core/internal/nokia"
 )
@@ -63,6 +65,15 @@ func (e *Enricher) Process(deviceID, msisdn string, telemetry models.TagTelemetr
 		}
 		e.refreshNetworkSignals(context.Background(), &matrix)
 
+		go func() {
+			scored := decision.CallIntelligence(matrix)
+			if scored.EventType != "NORMAL" && scored.Confidence > 0.1 {
+				config.LogSuccess("ALERT", fmt.Sprintf("%s detected (%.0f%%) for %s",
+					scored.EventType, scored.Confidence*100, matrix.DeviceID))
+				// TODO: Wire to alert router once Mphele finalizes it
+			}
+		}()
+
 		e.mu.Lock()
 		e.cache[deviceID] = &networkState{
 			lat:             matrix.Nokia.Lat,
@@ -92,6 +103,7 @@ func (e *Enricher) Process(deviceID, msisdn string, telemetry models.TagTelemetr
 	}
 
 	e.logTelemetry(&matrix)
+	e.maybePersist(&matrix)
 }
 
 // refreshNetworkSignals calls the Nokia APIs in parallel and populates
@@ -233,4 +245,20 @@ func (e *Enricher) logTelemetry(m *models.SignalMatrix) {
 		m.Nokia.DeviceReachable,
 		m.Nokia.CongestionLevel,
 	)
+}
+
+func (e *Enricher) maybePersist(m *models.SignalMatrix) {
+	if db.Pool == nil {
+		return
+	}
+	_, err := db.Pool.Exec(context.Background(),
+		`INSERT INTO telemetry_events (device_id, msisdn, temp_c, accel, battery_pct, lat, lon, sim_swapped, device_swapped, roaming, reachable, congestion, recorded_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,now())`,
+		m.DeviceID, m.MSISDN, m.Telemetry.BodyTempC, m.Telemetry.AccelMagnitude, m.Telemetry.BatteryPct,
+		m.Nokia.Lat, m.Nokia.Lon, m.Nokia.SimSwapped, m.Nokia.DeviceSwapped, m.Nokia.Roaming,
+		m.Nokia.DeviceReachable, m.Nokia.CongestionLevel,
+	)
+	if err != nil {
+		config.LogError("DB", "insert: "+err.Error())
+	}
 }
