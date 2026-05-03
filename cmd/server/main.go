@@ -1,48 +1,150 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
+	"firebase.google.com/go/v4/messaging"
 	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/websocket/v2"
+	"github.com/uwatu/uwatu-core/internal/alerts"
 	"github.com/uwatu/uwatu-core/internal/config"
 	"github.com/uwatu/uwatu-core/internal/db"
+	"github.com/uwatu/uwatu-core/internal/farm"
+	"github.com/uwatu/uwatu-core/internal/geofence"
 	"github.com/uwatu/uwatu-core/internal/ingestion"
 	"github.com/uwatu/uwatu-core/internal/nokia"
+	"github.com/uwatu/uwatu-core/internal/ws"
 )
 
 func main() {
 	config.LogInfo("SYSTEM", "Starting Uwatu Core API Gateway...")
 
-	key := os.Getenv("NOKIA_RAPIDAPI_KEY")
-	if len(key) > 8 {
-		config.LogInfo("DEBUG", fmt.Sprintf("Using API key starting with: %s...", key[:8]))
-	} else {
-		config.LogError("DEBUG", "API key NOT FOUND or too short")
+	// Load configuration
+	cfg, err := config.LoadConfig(".")
+	if err != nil {
+		config.LogError("CONFIG", fmt.Sprintf("Failed to load config: %v", err))
+		// Non-fatal: use env vars directly for hackathon
 	}
 
-	nokiaClient := nokia.NewClient(
-		os.Getenv("NOKIA_RAPIDAPI_KEY"), // e.g., export NOKIA_RAPIDAPI_KEY=your-new-key
-		"network-as-code.nokia.rapidapi.com",
-		"https://network-as-code.p-eu.rapidapi.com",
-	)
-
-	// Initialize database (our demo can run without it
+	// Database
 	if err := db.Connect(); err != nil {
-		config.LogError("DB", "Could not connect: "+err.Error())
+		config.LogError("DB", err.Error())
 	}
 	db.RunMigrations()
 	defer db.Close()
 
-	enricher := ingestion.NewEnricher(nokiaClient)
+	// Farm and animal registries
+	farmReg := farm.NewRegistry(db.Pool)
+	animalReg := farm.NewAnimalRegistry(db.Pool)
+
+	// Geofence manager (loads boundaries from DB)
+	geofenceMgr := geofence.NewManager(db.Pool)
+	if err := geofenceMgr.LoadAll(context.Background()); err != nil {
+		config.LogError("GEOFENCE", "Failed to load geofences: "+err.Error())
+	}
+
+	// Nokia client (using env vars for key, host, base URL)
+	nokiaClient := nokia.NewClient(
+		os.Getenv("NOKIA_RAPIDAPI_KEY"),
+		"network-as-code.nokia.rapidapi.com",
+		"https://network-as-code.p-eu.rapidapi.com",
+	)
+
+	// Firebase FCM (optional)
+	var fcmClient *messaging.Client
+	if cfg.FirebaseProjectID != "" {
+		fcmClient, _ = alerts.InitializeFCM(cfg.FirebaseProjectID)
+	}
+
+	// Alert router
+	router := alerts.NewAlertRouter(
+		db.Pool,
+		fcmClient,
+		cfg.ATApiKey,
+		cfg.ATSandboxUsername,
+		"UWATU", // WhatsApp from
+	)
+
+	// WebSocket hub
+	hub := ws.NewHub()
+
+	// Enricher with full dependencies
+	enricher := ingestion.NewEnricher(nokiaClient, animalReg, farmReg, geofenceMgr, router, hub)
+
+	// MQTT handler
 	mqttHandler := ingestion.NewHandler(enricher)
+	go mqttHandler.StartMQTT("tcp://broker.hivemq.com:1883", "uwatu_core_"+fmt.Sprint(time.Now().Unix()))
 
-	go mqttHandler.StartMQTT("tcp://broker.hivemq.com:1883", "uwatu_core_elvis")
-
+	// Fiber app
 	app := fiber.New(fiber.Config{DisableStartupMessage: true})
 
+	// WebSocket endpoint
+	app.Use("/ws", func(c *fiber.Ctx) error {
+		if websocket.IsWebSocketUpgrade(c) {
+			return c.Next()
+		}
+		return fiber.ErrUpgradeRequired
+	})
+	app.Get("/ws/farm/:farm_id", websocket.New(func(c *websocket.Conn) {
+		hub.Upgrade(c) // need to implement Upgrade method on Hub
+	}))
+
+	// Geofence onboarding endpoint (receives polygon, stores in DB)
+	// ---- GEOPENCE ONBOARDING ----
+	app.Post("/api/farms", func(c *fiber.Ctx) error {
+		var body struct {
+			FarmName string        `json:"farmName"`
+			Boundary [][][]float64 `json:"boundary"`
+		}
+		if err := c.BodyParser(&body); err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+		}
+		if len(body.Boundary) == 0 || len(body.Boundary[0]) < 3 {
+			return c.Status(400).JSON(fiber.Map{"error": "boundary must be a polygon with at least 3 points"})
+		}
+
+		// Build WKT polygon
+		wkt := "POLYGON(("
+		for i, coord := range body.Boundary[0] {
+			if i > 0 {
+				wkt += ","
+			}
+			wkt += fmt.Sprintf("%f %f", coord[0], coord[1]) // lon lat
+		}
+		wkt += "))"
+
+		_, err := db.Pool.Exec(context.Background(),
+			"INSERT INTO farms (id, farmer_id, name, boundary) VALUES (gen_random_uuid(), 'demo-farmer', $1, ST_GeomFromText($2, 4326))",
+			body.FarmName, wkt)
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+
+		// Reload geofence cache
+		if err := geofenceMgr.LoadAll(context.Background()); err != nil {
+			config.LogError("GEOFENCE", "Failed to reload geofences: "+err.Error())
+		}
+		config.LogInfo("GEOFENCE", fmt.Sprintf("Boundary stored for farm: %s", body.FarmName))
+		return c.JSON(fiber.Map{"status": "ok", "farmName": body.FarmName})
+	})
+
+	// ---- WEBSOCKET ----
+	app.Use("/ws", func(c *fiber.Ctx) error {
+		if websocket.IsWebSocketUpgrade(c) {
+			return c.Next()
+		}
+		return fiber.ErrUpgradeRequired
+	})
+	app.Get("/ws/farm/:farm_id", websocket.New(func(c *websocket.Conn) {
+		hub.Upgrade(c)
+	}))
+
+	// Start server
 	go func() {
 		config.LogInfo("SERVER", "Fiber listening on port 8080")
 		if err := app.Listen(":8080"); err != nil {
@@ -50,9 +152,9 @@ func main() {
 		}
 	}()
 
+	// Graceful shutdown
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
 	<-quit
-
 	config.LogInfo("SYSTEM", "Shutting down...")
 }
