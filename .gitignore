@@ -29,3 +29,5 @@ go.work.sum
 .idea/
 .vscode/
 *.swp
+stats.sh
+logfile

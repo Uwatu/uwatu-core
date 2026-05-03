@@ -7,16 +7,25 @@ import (
 	"time"
 
 	"github.com/uwatu/uwatu-core/internal/config"
+	"github.com/uwatu/uwatu-core/internal/db"
+	"github.com/uwatu/uwatu-core/internal/decision"
 	"github.com/uwatu/uwatu-core/internal/models"
 	"github.com/uwatu/uwatu-core/internal/nokia"
 )
 
 // networkState stores the last retrieved Nokia data for a device.
 type networkState struct {
-	lat        float64
-	lon        float64
-	simSwapped bool
-	lastFetch  time.Time
+	lat             float64
+	lon             float64
+	simSwapped      bool
+	deviceSwapped   bool
+	roaming         bool
+	roamingCountry  int
+	deviceReachable string
+	congestionLevel string
+	qodSessionID    string
+	sliceID         string
+	lastFetch       time.Time
 }
 
 // Enricher coordinates the fusion of real-time firmware telemetry with
@@ -43,36 +52,58 @@ func (e *Enricher) Process(deviceID, msisdn string, telemetry models.TagTelemetr
 		DeviceID:  deviceID,
 		MSISDN:    msisdn,
 		Telemetry: telemetry,
-		// FarmID, AnimalID, Baseline and Context will be populated
-		// later by the farm registry and intelligence layer.
 	}
 
-	// 1. Thread‑safe read from cache
 	e.mu.RLock()
 	state, exists := e.cache[deviceID]
 	e.mu.RUnlock()
 
-	// 2. Refresh network signals if needed (every 2 minutes)
 	if !exists || time.Since(state.lastFetch) > 2*time.Minute {
+		if exists {
+			matrix.Nokia.QoDSessionID = state.qodSessionID
+			matrix.Nokia.SliceID = state.sliceID
+		}
 		e.refreshNetworkSignals(context.Background(), &matrix)
 
-		// 3. Update cache with fresh values (or zero if calls failed)
+		go func() {
+			scored := decision.CallIntelligence(matrix)
+			if scored.EventType != "NORMAL" && scored.Confidence > 0.1 {
+				config.LogSuccess("ALERT", fmt.Sprintf("%s detected (%.0f%%) for %s",
+					scored.EventType, scored.Confidence*100, matrix.DeviceID))
+				// TODO: Wire to alert router once Mphele finalizes it
+			}
+		}()
+
 		e.mu.Lock()
 		e.cache[deviceID] = &networkState{
-			lat:        matrix.Nokia.Lat,
-			lon:        matrix.Nokia.Lon,
-			simSwapped: matrix.Nokia.SimSwapped,
-			lastFetch:  time.Now(),
+			lat:             matrix.Nokia.Lat,
+			lon:             matrix.Nokia.Lon,
+			simSwapped:      matrix.Nokia.SimSwapped,
+			deviceSwapped:   matrix.Nokia.DeviceSwapped,
+			roaming:         matrix.Nokia.Roaming,
+			roamingCountry:  matrix.Nokia.RoamingCountry,
+			deviceReachable: matrix.Nokia.DeviceReachable,
+			congestionLevel: matrix.Nokia.CongestionLevel,
+			qodSessionID:    matrix.Nokia.QoDSessionID,
+			sliceID:         matrix.Nokia.SliceID,
+			lastFetch:       time.Now(),
 		}
 		e.mu.Unlock()
 	} else {
-		// Use cached network state
 		matrix.Nokia.Lat = state.lat
 		matrix.Nokia.Lon = state.lon
 		matrix.Nokia.SimSwapped = state.simSwapped
+		matrix.Nokia.DeviceSwapped = state.deviceSwapped
+		matrix.Nokia.Roaming = state.roaming
+		matrix.Nokia.RoamingCountry = state.roamingCountry
+		matrix.Nokia.DeviceReachable = state.deviceReachable
+		matrix.Nokia.CongestionLevel = state.congestionLevel
+		matrix.Nokia.QoDSessionID = state.qodSessionID
+		matrix.Nokia.SliceID = state.sliceID
 	}
 
 	e.logTelemetry(&matrix)
+	e.maybePersist(&matrix)
 }
 
 // refreshNetworkSignals calls the Nokia APIs in parallel and populates
@@ -80,9 +111,17 @@ func (e *Enricher) Process(deviceID, msisdn string, telemetry models.TagTelemetr
 // continues with whatever was returned (zero values on error).
 func (e *Enricher) refreshNetworkSignals(ctx context.Context, matrix *models.SignalMatrix) {
 	var wg sync.WaitGroup
-	wg.Add(5)
+	wg.Add(7)
 
-	delays := []time.Duration{0, 150 * time.Millisecond, 300 * time.Millisecond, 450 * time.Millisecond, 600 * time.Millisecond}
+	delays := []time.Duration{
+		0,
+		150 * time.Millisecond,
+		300 * time.Millisecond,
+		450 * time.Millisecond,
+		600 * time.Millisecond,
+		750 * time.Millisecond,
+		900 * time.Millisecond,
+	}
 
 	// 1. Location
 	go func() {
@@ -129,7 +168,7 @@ func (e *Enricher) refreshNetworkSignals(ctx context.Context, matrix *models.Sig
 		}
 	}()
 
-	// 4. Roaming Status
+	// 4. Roaming
 	go func() {
 		defer wg.Done()
 		time.Sleep(delays[3])
@@ -155,10 +194,39 @@ func (e *Enricher) refreshNetworkSignals(ctx context.Context, matrix *models.Sig
 		matrix.Nokia.DeviceSwapped = devSwap.Swapped
 	}()
 
-	wg.Wait()
+	// 6. QoD (only if no active session)
+	go func() {
+		defer wg.Done()
+		time.Sleep(delays[5])
+		if matrix.Nokia.QoDSessionID != "" {
+			return
+		}
+		session, err := e.nokiaClient.CreateQoDSession(ctx, matrix.MSISDN, "DOWNLINK_M_UPLINK_L", 60)
+		if err != nil {
+			config.LogError("NOKIA_QOD", err.Error())
+			return
+		}
+		matrix.Nokia.QoDSessionID = session.SessionID
+		config.LogInfo("NOKIA_QOD", fmt.Sprintf("Session created: %s", session.SessionID))
+	}()
 
-	// Stub Congestion Insights until a webhook receiver is implemented.
-	// Real integration will push updates; for now we assume normal conditions.
+	// 7. Slicing (only if no active slice)
+	go func() {
+		defer wg.Done()
+		time.Sleep(delays[6])
+		if matrix.Nokia.SliceID != "" {
+			return
+		}
+		slice, err := e.nokiaClient.CreateNetworkSlice(ctx, matrix.MSISDN)
+		if err != nil {
+			config.LogError("NOKIA_SLICE", err.Error())
+			return
+		}
+		matrix.Nokia.SliceID = slice.Name
+		config.LogInfo("NOKIA_SLICE", fmt.Sprintf("Slice created: %s (state: %s)", slice.Name, slice.State))
+	}()
+
+	wg.Wait()
 	matrix.Nokia.CongestionLevel = "Low"
 }
 
@@ -175,6 +243,22 @@ func (e *Enricher) logTelemetry(m *models.SignalMatrix) {
 		m.Nokia.DeviceSwapped,
 		m.Nokia.Roaming,
 		m.Nokia.DeviceReachable,
-		m.Nokia.CongestionLevel, // will be empty until real integration
+		m.Nokia.CongestionLevel,
 	)
+}
+
+func (e *Enricher) maybePersist(m *models.SignalMatrix) {
+	if db.Pool == nil {
+		return
+	}
+	_, err := db.Pool.Exec(context.Background(),
+		`INSERT INTO telemetry_events (device_id, msisdn, temp_c, accel, battery_pct, lat, lon, sim_swapped, device_swapped, roaming, reachable, congestion, recorded_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,now())`,
+		m.DeviceID, m.MSISDN, m.Telemetry.BodyTempC, m.Telemetry.AccelMagnitude, m.Telemetry.BatteryPct,
+		m.Nokia.Lat, m.Nokia.Lon, m.Nokia.SimSwapped, m.Nokia.DeviceSwapped, m.Nokia.Roaming,
+		m.Nokia.DeviceReachable, m.Nokia.CongestionLevel,
+	)
+	if err != nil {
+		config.LogError("DB", "insert: "+err.Error())
+	}
 }

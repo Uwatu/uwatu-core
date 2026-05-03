@@ -1,160 +1,222 @@
-# uwatu-core – Uwatu Unified Livestock Protection Platform (API Gateway)
-
----
+# uwatu-core · Uwatu Unified Livestock Protection Platform (API Gateway)
 
 ## Project Status
 
-- [x] **Core framework** – Fiber v2 server, MQTT client, configuration via Viper
-- [x] **Nokia API Client** – RapidAPI gateway with rate limiting & shared transport
-- [x] **Location Retrieval** – endpoint working with sandbox (test numbers `+99999991000`, etc.)
-- [x] **SIM Swap Detection** – endpoint integrated
-- [x] **MQTT Ingestion** – live telemetry from simulator, JSON payload parsing
-- [x] **Enricher Engine** – thread‑safe caching, parallel Nokia calls, SignalMatrix assembly
-- [x] **Professional Logger** – ANSI‑colored, bold key values, zero clutter
-- [ ] **Database layer** – TimescaleDB/PostgreSQL with migrations (assigned to Elvis)
-- [ ] **Fiber server wiring** – full setup: routes, middleware, DB pool (assigned to Elvis)
-- [ ] **Remaining Nokia APIs** – Device Status, Connectivity, Congestion, Roaming, QoD, Slicing, Number Verification (assigned to Elvis)
-- [ ] **Models & shared structs** – TagTelemetry, SignalMatrix, ScoredEvent, AlertPayload (assigned to Mphele)
-- [ ] **Farm registry, animal CRUD, geofence manager** – core domain logic (assigned to Mphele)
-- [ ] **Alert router** – tier‑based channel selection, goroutines per notification (assigned to Mphele)
-- [ ] **Africa's Talking integration** – SMS, WhatsApp, USSD senders (assigned to Mphele)
-- [ ] **Firebase FCM** – push notifications for Tier‑3 devices (assigned to Mphele)
-- [ ] **Decision engine handoff** – POST /score to uwatu‑intelligence with 500ms timeout (assigned to Elvis)
-- [ ] **Tests** – unit tests for Nokia client, table‑driven tests for alert routing
-- [ ] **Documentation** – README, API contracts, architecture diagrams
-
-**Legend:** `x` = completed, ` ` = pending
+- [x] **Core framework** – Fiber v2 server, MQTT client, Viper config, JWT auth middleware
+- [x] **Nokia API Client** – RapidAPI gateway with shared transport & rate limiting
+- [x] **All 9 Nokia APIs** – Location, SIM Swap, Reachability, Roaming, Device Swap, QoD, Slicing, Congestion (stub), Number Verification (client)
+- [x] **MQTT Ingestion** – JSON payload parsing with type‑safe conversion
+- [x] **Enricher Engine** – thread‑safe caching, parallel staggered Nokia calls, SignalMatrix assembly
+- [x] **Models** – TagTelemetry, SignalMatrix, ScoredEvent, AlertPayload, NokiaSignals
+- [x] **Environment Config** – Viper‑based, JWT secret, RapidAPI key, DB credentials
+- [x] **Auth Middleware** – JWT generation/validation, RBAC middleware
+- [x] **Notification Dispatchers** – Africa's Talking SMS, WhatsApp, USSD, Firebase FCM
+- [x] **Decision Engine** – POST /score to uwatu‑intelligence with 500ms timeout + cached fallback
+- [x] **Database Layer** – TimescaleDB/PostgreSQL connection pool, hypertable, persistence
+- [x] **WebSocket Hub** – live telemetry broadcast to dashboard
+- [ ] **Alert Router** – tier‑based channel selection, notification_log writes (Mphele)
+- [ ] **Farm Registry, Animal CRUD, Geofence Manager** – core domain logic (Mphele)
+- [ ] **Intelligence Service** – Python/FastAPI classification endpoint (Mphele)
+- [ ] **Coverage Map** – network coverage visualization (Elvis, stretch)
+- [ ] **LITS‑Compliant Digital Evidence Export** – forensic report generation (Elvis, stretch)
 
 ---
 
-## How to Run (development)
+## Project Overview
 
-1. **Prerequisites**
-    - Go 1.22+
-    - Git
-    - Access to the Uwatu simulator (or real tags)
-    - RapidAPI key for Nokia Network as Code (free Basic plan)
+`uwatu-core` is the central nervous system of the Uwatu platform. It receives real-time telemetry from livestock ear tags (or our Go simulator), enriches that data with nine Nokia Network as Code CAMARA APIs, persists everything into a TimescaleDB hypertable, and passes a fully assembled **SignalMatrix** to the Python intelligence service for behavioural classification. Alerts are then routed through Africa’s Talking and Firebase to reach smallholder farmers on any phone.
 
-2. **Set environment variables**
-   ```bash
-   export NOKIA_RAPIDAPI_KEY="your-rapidapi-key"
-   ```
-
-3. **Start the simulator**  
-   (in a separate terminal) – ensure it publishes MQTT to `uwatu/farm/+/tag/+` with Nokia magic test numbers.
-
-4. **Run the core**
-   ```bash
-   go run ./cmd/server
-   ```
-   You will see live telemetry lines with enriched location data.
+The core is built in Go (Fiber v2) with an emphasis on resilience, low latency, and minimal external API consumption – critical for rural Sub‑Saharan Africa where both connectivity and budget are scarce.
 
 ---
 
-## Architecture Overview
+## Architecture
 
 ```text
 Simulator / Real Tags
-       │  MQTT (CBOR/JSON)
+       │  MQTT (JSON)
        ▼
 ┌─────────────────────┐
-│  Ingestion Handler  │
-│ • parses nested JSON│
-│ • extracts sensor   │
-│   values            │
+│  Ingestion Handler  │ handler.go
+│ • subscribes to      │
+│   uwatu/farm/+/tag/+ │
+│ • parses nested JSON │
+│ • builds TagTelemetry│
 └────────┬────────────┘
-         │
+         │ device_id, msisdn, telemetry
          ▼
 ┌─────────────────────┐
-│     Enricher        │
+│     Enricher         │ enricher.go
 │ • 2‑minute cache    │
-│ • parallel Nokia    │
-│   API calls         │
-│ • builds SignalMatrix│
+│ • 7 parallel Nokia  │
+│   API calls (staggered)
+│ • assembles SignalMatrix
+│ • persists to DB    │
+│ • calls Intelligence │
 └────────┬────────────┘
-         │
-         ▼
-   (to uwatu‑intelligence)
-   POST /score → classification
-         │
+         │ SignalMatrix
          ▼
 ┌─────────────────────┐
-│   Alert Router      │
+│   Decision Engine    │ decision/engine.go
+│ • POST /score to     │
+│   uwatu-intelligence │
+│ • 500ms timeout      │
+│ • safe fallback      │
+└────────┬────────────┘
+         │ ScoredEvent
+         ▼
+┌─────────────────────┐
+│   Alert Router       │ alerts/router.go (Mphele)
 │ • tier‑based channel│
 │   selection         │
 │ • SMS/WhatsApp/USSD │
-│   /Push             │
+│   /Push via AT & FCM│
+└─────────────────────┘
+         │
+         ▼
+┌─────────────────────┐
+│   WebSocket Hub      │ ws/hub.go
+│ • broadcasts live    │
+│   telemetry to dashboard
 └─────────────────────┘
 ```
 
 ---
 
-## Implemented Features – Detail
+## Implemented Features
 
 ### MQTT Ingestion (`internal/ingestion/handler.go`)
-
-- Subscribes to `uwatu/farm/+/tag/+` on the HiveMQ public broker.
-- Unique client ID prevents auth conflicts.
-- Unmarshalls the simulator's nested JSON: extracts `device_id`, `msisdn`, and the `firmware_payload` fields (`body_temp_c`, `accel_magnitude`, `battery_pct`).
-- Converts all JSON numbers (which Go treats as `float64`) to the correct Go types.
+- Connects to HiveMQ public broker (`tcp://broker.hivemq.com:1883`).
+- Uses a unique, timestamped Client ID to avoid conflicts.
+- Unmarshals nested JSON (the simulator’s `firmware_payload` object).
+- Handles Go’s `float64` JSON numbers by explicit casting to `int` where needed.
 
 ### Nokia API Client (`internal/nokia/`)
+A shared HTTP client (`client.go`) handles:
+- RapidAPI headers (`x-rapidapi-key`, `x-rapidapi-host`)
+- Rate limiter: 100 requests/minute with burst of 8 (allows parallel calls)
+- 3‑second context deadline per call (10 s for slicing)
 
-- Shared client (`client.go`) attaches RapidAPI headers and enforces a 100 req/min rate limit.
-- Each API call gets a 3‑second context deadline.
-- **Location Retrieval:** `POST /location-retrieval/v0/retrieve` – returns lat, lon, accuracy.
-- **SIM Swap Detection:** `POST /sim-swap/v0/check` – returns `swapped` boolean.
-- All responses are decoded into proper structs, and errors are handled without blocking the pipeline.
+The following **nine** endpoints are integrated:
+
+| # | API | Endpoint | Status |
+|---|-----|----------|--------|
+| 1 | Location Retrieval | `/location-retrieval/v0/retrieve` | real |
+| 2 | SIM Swap | `/passthrough/camara/v1/sim-swap/sim-swap/v0/check` | real |
+| 3 | Device Reachability | `/device-status/device-reachability-status/v1/retrieve` | real |
+| 4 | Device Roaming | `/device-status/device-roaming-status/v1/retrieve` | real |
+| 5 | Device Swap | `/passthrough/camara/v1/device-swap/device-swap/v1/check` | real |
+| 6 | Quality on Demand | `/quality-on-demand/v1/sessions` | real |
+| 7 | Network Slicing | `/slice/v1/slices` | real |
+| 8 | Congestion Insights | (stub – always returns `"Low"`) | stub |
+| 9 | Number Verification | `/passthrough/camara/v1/number-verification/.../verify` | client exists |
+
+All responses are decoded into typed structs. Errors are logged but never block the pipeline (fail‑safe).
 
 ### Enricher Engine (`internal/ingestion/enricher.go`)
+- Thread‑safe in‑memory cache (TTL = 2 minutes) using `sync.RWMutex`.
+- On each MQTT message, telemetry is updated instantly.
+- Network refresh fires up to **7 parallel goroutines** with staggered delays (0–900 ms) to avoid RapidAPI burst limits.
+- QoD, Slicing, and Verification calls are made only once; subsequent cycles reuse stored IDs.
+- After enrichment, the `SignalMatrix` is persisted to TimescaleDB and optionally sent to the intelligence service.
 
-- Caches the last location/SIM status per device (TTL = 2 minutes) using `sync.RWMutex`.
-- On each MQTT message:
-    - Telemetry values are updated immediately.
-    - If the cache is stale, it fires parallel goroutines to refresh Nokia data.
-    - A 200ms stagger between location calls prevents RapidAPI burst limits.
-    - If a Nokia API fails, the system continues with cached/default values (fail‑safe).
+### Database Layer (`internal/db/`)
+- PostgreSQL 17 + TimescaleDB connection pool (`pgxpool`).
+- Automatic migration runner (stubbed for hackathon).
+- Telemetry hypertable: `telemetry_events` partitioned by `recorded_at`.
+- Insertion via `maybePersist()` in the enrichment loop.
 
-### Logging (`internal/config/logger.go`)
+### Decision Engine (`internal/decision/engine.go`)
+- `POST /score` to `uwatu-intelligence` with 500 ms timeout.
+- Bearer token authentication.
+- On timeout or error, returns a safe `NORMAL` fallback so the pipeline never stalls.
 
-- Clean, colour‑coded output: `[INFO]` in cyan, `[OK]` in green, `[ERR]` in red.
-- A dedicated `LogEnrich` function prints a scannable dashboard line with bold vital values and a red `ALERT` when a SIM swap is detected.
+### Professional ANSI Logger (`internal/config/logger.go`)
+- Colour‑coded, zero‑emoji output.
+- `LogEnrich` prints a compact dashboard line with bold vital values, colour‑coded by thresholds (fever, high movement, low battery, tamper, roaming, network type).
+
+### WebSocket Hub (`internal/ws/`)
+- Maintains a set of active dashboard connections.
+- Broadcasts every enriched telemetry update as JSON.
+- Role‑filtered: farmers see only their farm’s data; insurers/vets see alert events.
+
+### Dashboard (uwatu-dashboard repo)
+- React + TypeScript + Vite + Tailwind + Leaflet.
+- Live herd map, animal detail, alert history, insurance dashboard, notifications, settings, onboarding, and login.
+- Connects to uwatu-core via WebSocket for real‑time updates.
 
 ---
 
-## Upcoming Work (linked issues)
+## How to Run
 
-- `#10` – Database wiring (Elvis)
-- `#7`, `#9` – Remaining Nokia APIs (Elvis)
-- `#11` – Decision engine handoff to uwatu‑intelligence (Elvis)
-- `#15` – Shared data structures (Mphele)
-- `#16` – Farm registry, animal CRUD, geofence manager (Mphele)
-- `#12` – Alert router (Mphele)
-- `#13` – Africa's Talking integration (Mphele)
-- `#14` – Firebase FCM (Mphele)
-- `#1` – LITS‑compliant digital evidence export (feature)
+### Prerequisites
+- Go 1.22+
+- PostgreSQL 17 + TimescaleDB (optional – core runs without DB)
+- RapidAPI key for Nokia Network as Code (free Basic plan)
+- Africa’s Talking sandbox credentials (optional, for alerts)
+- Firebase service account (optional, for push notifications)
 
-All issues are tracked in the repository's issue tracker.
+### Environment Variables
+```bash
+export NOKIA_RAPIDAPI_KEY="your-rapidapi-key"
+export DATABASE_URL="postgres://user:pass@127.0.0.1:5432/uwatu?sslmode=disable"
+export AT_API_KEY="your-africastalking-key"
+export FIREBASE_CREDENTIALS="path/to/serviceAccountKey.json"
+export JWT_SECRET="your-jwt-secret"
+```
+
+### Start the Simulator
+(In a separate terminal) – ensure it publishes to `uwatu/farm/+/tag/+` with Nokia magic test numbers (`+99999991000`, etc.).
+
+### Launch uwatu-core
+```bash
+go run ./cmd/server
+```
+
+You will see live telemetry lines with enriched data. If the database is connected, rows appear in the `telemetry_events` hypertable.
+
+### Connect the Dashboard
+The dashboard WebSocket connects to `ws://localhost:8080/ws/farm/{farm_id}`. Configure the farm ID in the dashboard’s environment.
 
 ---
 
-## Integration Contract (with uwatu‑intelligence)
+## Key Design Decisions
 
-When the decision engine call is implemented, `uwatu-core` will `POST /score` to the intelligence service with a JSON payload containing:
+- **Staggered API calls** – RapidAPI’s free tier has a per‑second burst limit. Spreading 7 calls over 900 ms avoids 429 errors while still completing well within the 2‑minute cache window.
+- **2‑minute cache** – Without caching, the free 500 requests/month quota would be exhausted in minutes. The cache keeps us safely under the limit even with 2 devices.
+- **Fail‑safe enrichment** – If any Nokia API fails, the system continues with cached or zero values. The pipeline never blocks on external dependency.
+- **No emoji logging** – Professional ANSI colours only. Bold vitals for quick scanning.
+- **JSON over CBOR (for hackathon)** – While the blueprint targets CBOR for bandwidth savings, JSON from the simulator is sufficient for the demo. CBOR support is a production roadmap item.
+- **TimescaleDB hypertable** – Chosen over pure PostgreSQL or InfluxDB because it gives us both relational data (farmers, animals, geofences) and time‑series performance in a single database.
 
-- Telemetry snapshot (temp, accel, battery, RSSI, cell ID, etc.)
-- All available Nokia signals (location, SIM swap, connectivity, etc.)
-- Context (time, season, herd state)
+---
 
-Timeout: 500ms. On timeout or error, the last cached classification is used.
+## Remaining Work
+
+- **Alert Router integration** – Mphele’s `alerts/router.go` is partially built; it needs to be connected to the enricher so that scored events trigger SMS/WhatsApp/USSD/Push.
+- **Farm Registry & Geofence Manager** – CRUD endpoints and point‑in‑polygon checking for farm boundaries.
+- **Intelligence Service** – Mphele’s `uwatu-intelligence` Python service must be running for real classifications.
+- **Coverage Map** – A visual map of known network coverage areas.
+- **LITS‑Compliant Digital Evidence Export** – Forensic report generation for theft events.
 
 ---
 
 ## Lessons Learned
 
-- Go's `json.Unmarshal` treats all numbers as `float64` – always cast explicitly.
+- Go’s `json.Unmarshal` treats all numbers as `float64` – always cast explicitly.
 - The public HiveMQ broker rejects duplicate client IDs – use a timestamped value.
-- The Nokia sandbox is reachable only through RapidAPI; the old `networkascode.nokia.io` URL is dead.
-- A 200ms delay between concurrent location calls avoids 429 errors from RapidAPI's per‑second burst limit.
-- The 2‑minute cache keeps us safely within the free 500 req/month quota.
-- The sandbox must use Nokia's test phone numbers (like `+99999991000`); any other number returns a 401.
+- The Nokia sandbox is reachable **only** through RapidAPI; the old `networkascode.nokia.io` URL is dead.
+- RapidAPI has a per‑second burst limit – staggered goroutines with 150 ms offsets prevent 429 errors.
+- Sandbox magic MSISDNs (e.g. `+99999991000`) must be used; any other number returns a 401.
+- QoD returns `201 Created`, Slicing returns `202 Accepted` – status checks must accommodate these.
+- Number Verification is a one‑time operation (registration) and should not be part of the periodic refresh.
+- Multiple PostgreSQL versions on macOS can conflict; uninstalling old versions saved hours of debugging.
+
+---
+
+## Team
+
+- **Elvis Chege** (`github.com/elviscgn`) – Backend (Go), firmware (Zig), simulator, dashboard.
+- **Mphele Moswane** (`github.com/Mphele`) – Intelligence layer (Python), alert router, models, config, auth.
+
+Built for the **Africa Ignite Hackathon 2026** by GSMA & Nokia.
