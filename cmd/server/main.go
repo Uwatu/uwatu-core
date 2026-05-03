@@ -8,6 +8,7 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/uwatu/uwatu-core/internal/config"
+	"github.com/uwatu/uwatu-core/internal/db"
 	"github.com/uwatu/uwatu-core/internal/ingestion"
 	"github.com/uwatu/uwatu-core/internal/nokia"
 )
@@ -27,6 +28,13 @@ func main() {
 		"network-as-code.nokia.rapidapi.com",
 		"https://network-as-code.p-eu.rapidapi.com",
 	)
+
+	// Initialize database (our demo can run without it
+	if err := db.Connect(); err != nil {
+		config.LogError("DB", "Could not connect: "+err.Error())
+	}
+	db.RunMigrations()
+	defer db.Close()
 
 	enricher := ingestion.NewEnricher(nokiaClient)
 	mqttHandler := ingestion.NewHandler(enricher)
