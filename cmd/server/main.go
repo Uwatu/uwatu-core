@@ -212,6 +212,13 @@ func main() {
 			"boundary": coords,
 		})
 	})
+
+	// ---- OTP Verification Stub (hackathon) ----
+	app.Post("/api/verify-otp", func(c *fiber.Ctx) error {
+		// Always succeed – real verification would check code via SMS gateway
+		return c.JSON(fiber.Map{"verified": true})
+	})
+
 	// ---- WebSocket ----
 	app.Use("/ws", func(c *fiber.Ctx) error {
 		if websocket.IsWebSocketUpgrade(c) {
