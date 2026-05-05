@@ -31,3 +31,4 @@ go.work.sum
 *.swp
 stats.sh
 logfile
+firebase-credentials.json
