@@ -1,27 +1,4 @@
 # uwatu-core · Uwatu Unified Livestock Protection Platform (API Gateway)
-
-## Project Status
-
-- [x] **Core framework** – Fiber v2 server, MQTT client, Viper config, JWT auth middleware
-- [x] **Nokia API Client** – RapidAPI gateway with shared transport & rate limiting
-- [x] **All 9 Nokia APIs** – Location, SIM Swap, Reachability, Roaming, Device Swap, QoD, Slicing, Congestion (stub), Number Verification (client)
-- [x] **MQTT Ingestion** – JSON payload parsing with type‑safe conversion
-- [x] **Enricher Engine** – thread‑safe caching, parallel staggered Nokia calls, SignalMatrix assembly
-- [x] **Models** – TagTelemetry, SignalMatrix, ScoredEvent, AlertPayload, NokiaSignals
-- [x] **Environment Config** – Viper‑based, JWT secret, RapidAPI key, DB credentials
-- [x] **Auth Middleware** – JWT generation/validation, RBAC middleware
-- [x] **Notification Dispatchers** – Africa's Talking SMS, WhatsApp, USSD, Firebase FCM
-- [x] **Decision Engine** – POST /score to uwatu‑intelligence with 500ms timeout + cached fallback
-- [x] **Database Layer** – TimescaleDB/PostgreSQL connection pool, hypertable, persistence
-- [x] **WebSocket Hub** – live telemetry broadcast to dashboard
-- [ ] **Alert Router** – tier‑based channel selection, notification_log writes (Mphele)
-- [ ] **Farm Registry, Animal CRUD, Geofence Manager** – core domain logic (Mphele)
-- [ ] **Intelligence Service** – Python/FastAPI classification endpoint (Mphele)
-- [ ] **Coverage Map** – network coverage visualization (Elvis, stretch)
-- [ ] **LITS‑Compliant Digital Evidence Export** – forensic report generation (Elvis, stretch)
-
----
-
 ## Project Overview
 
 `uwatu-core` is the central nervous system of the Uwatu platform. It receives real-time telemetry from livestock ear tags (or our Go simulator), enriches that data with nine Nokia Network as Code CAMARA APIs, persists everything into a TimescaleDB hypertable, and passes a fully assembled **SignalMatrix** to the Python intelligence service for behavioural classification. Alerts are then routed through Africa’s Talking and Firebase to reach smallholder farmers on any phone.
