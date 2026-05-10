@@ -9,7 +9,6 @@ import (
 	"github.com/uwatu/uwatu-core/internal/alerts"
 	"github.com/uwatu/uwatu-core/internal/config"
 	"github.com/uwatu/uwatu-core/internal/db"
-	"github.com/uwatu/uwatu-core/internal/decision"
 	"github.com/uwatu/uwatu-core/internal/farm"
 	"github.com/uwatu/uwatu-core/internal/geofence"
 	"github.com/uwatu/uwatu-core/internal/models"
@@ -17,7 +16,6 @@ import (
 	"github.com/uwatu/uwatu-core/internal/ws"
 )
 
-// networkState stores the last retrieved Nokia data for a device.
 type networkState struct {
 	lat             float64
 	lon             float64
@@ -32,8 +30,6 @@ type networkState struct {
 	lastFetch       time.Time
 }
 
-// Enricher coordinates the fusion of real-time firmware telemetry with
-// Nokia network-layer signals, using a two‑minute cache to limit API calls.
 type Enricher struct {
 	nokiaClient *nokia.Client
 	animalReg   *farm.AnimalRegistry
@@ -45,7 +41,6 @@ type Enricher struct {
 	cache       map[string]*networkState
 }
 
-// NewEnricher creates a new Enricher with an empty cache.
 func NewEnricher(
 	nc *nokia.Client,
 	ar *farm.AnimalRegistry,
@@ -65,11 +60,9 @@ func NewEnricher(
 	}
 }
 
-// Process accepts a device ID, MSISDN, firmware telemetry, and optional demo overrides,
-// constructs a SignalMatrix, refreshes Nokia data (skipping calls if overrides are present),
-// and logs the enriched telemetry to the terminal.
 func (e *Enricher) Process(deviceID, msisdn string, telemetry models.TagTelemetry,
-	simSwapOverride *bool, demoLat, demoLon *float64) {
+	simSwapOverride *bool, demoLat, demoLon *float64,
+	roamingOverride, deviceSwapOverride, connectivityOverride *bool) {
 
 	matrix := models.SignalMatrix{
 		DeviceID:  deviceID,
@@ -77,68 +70,21 @@ func (e *Enricher) Process(deviceID, msisdn string, telemetry models.TagTelemetr
 		Telemetry: telemetry,
 	}
 
-	// Apply overrides immediately (they will be used in refreshNetworkSignals as well)
-	if simSwapOverride != nil {
-		matrix.Nokia.SimSwapped = *simSwapOverride
-	}
-	if demoLat != nil && demoLon != nil {
-		matrix.Nokia.Lat = *demoLat
-		matrix.Nokia.Lon = *demoLon
-	}
-
+	// ── 1. Read cache ──
 	e.mu.RLock()
 	state, exists := e.cache[deviceID]
 	e.mu.RUnlock()
 
+	// ── 2. Refresh Nokia APIs only if cache is stale or missing ──
 	if !exists || time.Since(state.lastFetch) > 2*time.Minute {
 		if exists {
 			matrix.Nokia.QoDSessionID = state.qodSessionID
 			matrix.Nokia.SliceID = state.sliceID
 		}
-		e.refreshNetworkSignals(context.Background(), &matrix, simSwapOverride, demoLat, demoLon)
+		e.refreshNetworkSignals(context.Background(), &matrix,
+			simSwapOverride, demoLat, demoLon,
+			roamingOverride, deviceSwapOverride, connectivityOverride)
 
-		// ---- Geofence check ----
-		if e.animalReg != nil {
-			animal, err := e.animalReg.GetAnimalByDeviceID(context.Background(), deviceID)
-			if err == nil {
-				matrix.FarmID = animal.FarmID
-				if e.geofenceMgr != nil {
-					if poly, ok := e.geofenceMgr.Farms[animal.FarmID]; ok {
-						point := models.Point{Lat: matrix.Nokia.Lat, Lon: matrix.Nokia.Lon}
-						if !geofence.IsInside(point, poly) {
-							config.LogInfo("GEOFENCE", fmt.Sprintf("%s left farm %s", deviceID, animal.FarmID))
-						}
-					}
-				}
-			}
-		}
-
-		// ---- Decision Engine ----
-		go func() {
-			scored := decision.CallIntelligence(matrix)
-			if scored.EventType != "NORMAL" && scored.Confidence > 0.1 {
-				config.LogSuccess("ALERT", fmt.Sprintf("%s detected (%.0f%%) for %s",
-					scored.EventType, scored.Confidence*100, matrix.DeviceID))
-
-				// Route alert if we have a farm context
-				if e.alertRouter != nil && matrix.FarmID != "" {
-					farmObj, err := e.farmReg.GetFarm(context.Background(), matrix.FarmID)
-					if err == nil {
-						farmer, err := e.farmReg.GetFarmer(context.Background(), farmObj.FarmerID)
-						if err == nil {
-							payload := models.AlertPayload{
-								Event:   scored,
-								Farmer:  *farmer,
-								Message: scored.GeminiNarrative,
-							}
-							_ = e.alertRouter.RouteAlert(payload)
-						}
-					}
-				}
-			}
-		}()
-
-		// Update cache
 		e.mu.Lock()
 		e.cache[deviceID] = &networkState{
 			lat:             matrix.Nokia.Lat,
@@ -155,7 +101,6 @@ func (e *Enricher) Process(deviceID, msisdn string, telemetry models.TagTelemetr
 		}
 		e.mu.Unlock()
 	} else {
-		// Use cached network state
 		matrix.Nokia.Lat = state.lat
 		matrix.Nokia.Lon = state.lon
 		matrix.Nokia.SimSwapped = state.simSwapped
@@ -166,7 +111,72 @@ func (e *Enricher) Process(deviceID, msisdn string, telemetry models.TagTelemetr
 		matrix.Nokia.CongestionLevel = state.congestionLevel
 		matrix.Nokia.QoDSessionID = state.qodSessionID
 		matrix.Nokia.SliceID = state.sliceID
+
+		// Apply overrides even when cache is fresh
+		if simSwapOverride != nil {
+			matrix.Nokia.SimSwapped = *simSwapOverride
+		}
+		if demoLat != nil && demoLon != nil {
+			matrix.Nokia.Lat = *demoLat
+			matrix.Nokia.Lon = *demoLon
+		}
+		if roamingOverride != nil {
+			matrix.Nokia.Roaming = *roamingOverride
+			matrix.Nokia.RoamingCountry = 0
+		}
+		if deviceSwapOverride != nil {
+			matrix.Nokia.DeviceSwapped = *deviceSwapOverride
+		}
+		if connectivityOverride != nil {
+			if *connectivityOverride {
+				matrix.Nokia.DeviceReachable = "UNREACHABLE"
+			} else {
+				matrix.Nokia.DeviceReachable = "REACHABLE_DATA"
+			}
+		}
 	}
+
+	// ── 3. Geofence check (runs on EVERY message) ──
+	if e.animalReg != nil {
+		animal, err := e.animalReg.GetAnimalByDeviceID(context.Background(), deviceID)
+		if err == nil {
+			matrix.FarmID = animal.FarmID
+			if e.geofenceMgr != nil {
+				if poly, ok := e.geofenceMgr.Farms[animal.FarmID]; ok {
+					point := models.Point{Lat: matrix.Nokia.Lat, Lon: matrix.Nokia.Lon}
+					outside := !geofence.IsInside(point, poly)
+					matrix.Context.GeofenceDeparture = outside
+					if outside {
+						config.LogInfo("GEOFENCE", fmt.Sprintf("%s left farm %s", deviceID, animal.FarmID))
+					}
+				}
+			}
+		}
+	}
+
+	//// ── 4. Decision Engine (async) ──
+	//go func() {
+	//	scored := decision.CallIntelligence(matrix)
+	//	if scored.EventType != "NORMAL" && scored.Confidence > 0.1 {
+	//		config.LogSuccess("ALERT", fmt.Sprintf("%s detected (%.0f%%) for %s",
+	//			scored.EventType, scored.Confidence*100, matrix.DeviceID))
+	//
+	//		if e.alertRouter != nil && matrix.FarmID != "" {
+	//			farmObj, err := e.farmReg.GetFarm(context.Background(), matrix.FarmID)
+	//			if err == nil {
+	//				farmer, err := e.farmReg.GetFarmer(context.Background(), farmObj.FarmerID)
+	//				if err == nil {
+	//					payload := models.AlertPayload{
+	//						Event:   scored,
+	//						Farmer:  *farmer,
+	//						Message: scored.GeminiNarrative,
+	//					}
+	//					_ = e.alertRouter.RouteAlert(payload)
+	//				}
+	//			}
+	//		}
+	//	}
+	//}()
 
 	e.logTelemetry(&matrix)
 	e.maybePersist(&matrix)
@@ -176,23 +186,17 @@ func (e *Enricher) Process(deviceID, msisdn string, telemetry models.TagTelemetr
 	}
 }
 
-// refreshNetworkSignals calls the Nokia APIs in parallel and populates
-// the matrix's NokiaSignals field. If simulator overrides are present,
-// the corresponding Location / SIM Swap calls are skipped.
 func (e *Enricher) refreshNetworkSignals(ctx context.Context, matrix *models.SignalMatrix,
-	simSwapOverride *bool, demoLat, demoLon *float64) {
+	simSwapOverride *bool, demoLat, demoLon *float64,
+	roamingOverride, deviceSwapOverride, connectivityOverride *bool) {
 
 	var wg sync.WaitGroup
-	wg.Add(7) // still 7 goroutines (some may just return immediately)
+	wg.Add(7)
 
 	delays := []time.Duration{
-		0,
-		150 * time.Millisecond,
-		300 * time.Millisecond,
-		450 * time.Millisecond,
-		600 * time.Millisecond,
-		750 * time.Millisecond,
-		900 * time.Millisecond,
+		0, 150 * time.Millisecond, 300 * time.Millisecond,
+		450 * time.Millisecond, 600 * time.Millisecond,
+		750 * time.Millisecond, 900 * time.Millisecond,
 	}
 
 	// 1. Location
@@ -233,6 +237,14 @@ func (e *Enricher) refreshNetworkSignals(ctx context.Context, matrix *models.Sig
 	go func() {
 		defer wg.Done()
 		time.Sleep(delays[2])
+		if connectivityOverride != nil {
+			if *connectivityOverride {
+				matrix.Nokia.DeviceReachable = "UNREACHABLE"
+			} else {
+				matrix.Nokia.DeviceReachable = "REACHABLE_DATA"
+			}
+			return
+		}
 		status, err := e.nokiaClient.GetDeviceStatus(ctx, matrix.MSISDN)
 		if err != nil {
 			config.LogError("NOKIA_STATUS", err.Error())
@@ -253,6 +265,11 @@ func (e *Enricher) refreshNetworkSignals(ctx context.Context, matrix *models.Sig
 	go func() {
 		defer wg.Done()
 		time.Sleep(delays[3])
+		if roamingOverride != nil {
+			matrix.Nokia.Roaming = *roamingOverride
+			matrix.Nokia.RoamingCountry = 0
+			return
+		}
 		roam, err := e.nokiaClient.GetRoamingStatus(ctx, matrix.MSISDN)
 		if err != nil {
 			config.LogError("NOKIA_ROAM", err.Error())
@@ -267,6 +284,10 @@ func (e *Enricher) refreshNetworkSignals(ctx context.Context, matrix *models.Sig
 	go func() {
 		defer wg.Done()
 		time.Sleep(delays[4])
+		if deviceSwapOverride != nil {
+			matrix.Nokia.DeviceSwapped = *deviceSwapOverride
+			return
+		}
 		devSwap, err := e.nokiaClient.CheckDeviceSwap(ctx, matrix.MSISDN, 120)
 		if err != nil {
 			config.LogError("NOKIA_DEVSWAP", err.Error())
@@ -275,7 +296,7 @@ func (e *Enricher) refreshNetworkSignals(ctx context.Context, matrix *models.Sig
 		matrix.Nokia.DeviceSwapped = devSwap.Swapped
 	}()
 
-	// 6. QoD (only if no active session)
+	// 6. QoD
 	go func() {
 		defer wg.Done()
 		time.Sleep(delays[5])
@@ -291,7 +312,7 @@ func (e *Enricher) refreshNetworkSignals(ctx context.Context, matrix *models.Sig
 		config.LogInfo("NOKIA_QOD", fmt.Sprintf("Session created: %s", session.SessionID))
 	}()
 
-	// 7. Slicing (only if no active slice)
+	// 7. Slicing
 	go func() {
 		defer wg.Done()
 		time.Sleep(delays[6])
@@ -311,7 +332,6 @@ func (e *Enricher) refreshNetworkSignals(ctx context.Context, matrix *models.Sig
 	matrix.Nokia.CongestionLevel = "Low"
 }
 
-// logTelemetry prints the enriched telemetry line using the ANSI logger.
 func (e *Enricher) logTelemetry(m *models.SignalMatrix) {
 	config.LogEnrich(
 		m.DeviceID,
