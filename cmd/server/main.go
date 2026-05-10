@@ -9,7 +9,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
-
+	//"github.com/gorilla/websocket"
 	"firebase.google.com/go/v4/messaging"
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
@@ -175,21 +175,20 @@ func main() {
 		return c.JSON(fiber.Map{"status": "ok", "farmId": farmID})
 	})
 
-	// returns the polygon
+	// ---- Get farm boundary (by farm ID) ----
 	app.Get("/api/farms/:farmID", func(c *fiber.Ctx) error {
 		farmID := c.Params("farmID")
+		var name string
 		var wkt string
 		err := db.Pool.QueryRow(context.Background(),
-			"SELECT ST_AsText(boundary) FROM farms WHERE id = $1", farmID).Scan(&wkt)
+			"SELECT name, ST_AsText(boundary) FROM farms WHERE id = $1", farmID,
+		).Scan(&name, &wkt)
 		if err != nil {
 			return c.Status(404).JSON(fiber.Map{"error": "farm not found"})
 		}
 
-		// Parse WKT back to coordinates (simplified – returns ring as [][]float64)
-		// For a hackathon, we can just return the WKT and let frontend parse,
-		// but better to send coordinates.
+		// Parse WKT polygon into coordinates
 		var coords [][][]float64
-		// WKT format: POLYGON((lon1 lat1,lon2 lat2,...))
 		wkt = strings.TrimPrefix(wkt, "POLYGON((")
 		wkt = strings.TrimSuffix(wkt, "))")
 		rings := strings.Split(wkt, "),(")
@@ -209,6 +208,7 @@ func main() {
 
 		return c.JSON(fiber.Map{
 			"farmId":   farmID,
+			"farmName": name,
 			"boundary": coords,
 		})
 	})
