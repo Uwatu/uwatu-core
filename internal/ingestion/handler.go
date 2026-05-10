@@ -40,7 +40,7 @@ func (h *Handler) StartMQTT(brokerURL string, clientID string) {
 }
 
 // handleMessage unpacks the simulator JSON payload, builds a TagTelemetry,
-// and passes it to the Enricher.
+// extracts any demo overrides, and passes everything to the Enricher.
 func (h *Handler) handleMessage(client mqtt.Client, msg mqtt.Message) {
 	var payload map[string]interface{}
 	if err := json.Unmarshal(msg.Payload(), &payload); err != nil {
@@ -71,8 +71,21 @@ func (h *Handler) handleMessage(client mqtt.Client, msg mqtt.Message) {
 		config.LogError("INGEST", "Message arrived but firmware_payload was missing!")
 	}
 
+	// 3. Extract demo overrides from simulator
+	var simSwapOverride *bool
+	if v, ok := payload["sim_swap"].(bool); ok {
+		simSwapOverride = &v
+	}
+	var demoLat, demoLon *float64
+	if v, ok := payload["demo_lat"].(float64); ok {
+		demoLat = &v
+	}
+	if v, ok := payload["demo_lon"].(float64); ok {
+		demoLon = &v
+	}
+
 	config.LogInfo("INGEST", fmt.Sprintf("Tag: %s | Signal: Recv", deviceID))
 
-	// 3. Hand over to the enricher
-	h.enricher.Process(deviceID, msisdn, telemetry)
+	// 4. Hand over to the enricher with overrides
+	h.enricher.Process(deviceID, msisdn, telemetry, simSwapOverride, demoLat, demoLon)
 }
