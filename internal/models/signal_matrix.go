@@ -25,6 +25,7 @@ type EnvironmentContext struct {
 	IsDrySeason                   bool `json:"is_dry_season"`
 	MarketDay                     bool `json:"market_day"`
 	MinutesSinceGeofenceDeparture *int `json:"minutes_since_geofence_departure"`
+	GeofenceDeparture             bool `json:"geofence_departure"` // NEW
 }
 
 type SignalMatrix struct {
