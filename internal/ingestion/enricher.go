@@ -17,6 +17,7 @@ import (
 	"github.com/uwatu/uwatu-core/internal/ws"
 )
 
+// networkState stores the last retrieved Nokia data for a device.
 type networkState struct {
 	lat             float64
 	lon             float64
@@ -31,6 +32,8 @@ type networkState struct {
 	lastFetch       time.Time
 }
 
+// Enricher coordinates the fusion of real-time firmware telemetry with
+// Nokia network-layer signals, using a two‑minute cache to limit API calls.
 type Enricher struct {
 	nokiaClient *nokia.Client
 	animalReg   *farm.AnimalRegistry
@@ -42,6 +45,7 @@ type Enricher struct {
 	cache       map[string]*networkState
 }
 
+// NewEnricher creates a new Enricher with an empty cache.
 func NewEnricher(
 	nc *nokia.Client,
 	ar *farm.AnimalRegistry,
@@ -61,11 +65,25 @@ func NewEnricher(
 	}
 }
 
-func (e *Enricher) Process(deviceID, msisdn string, telemetry models.TagTelemetry) {
+// Process accepts a device ID, MSISDN, firmware telemetry, and optional demo overrides,
+// constructs a SignalMatrix, refreshes Nokia data (skipping calls if overrides are present),
+// and logs the enriched telemetry to the terminal.
+func (e *Enricher) Process(deviceID, msisdn string, telemetry models.TagTelemetry,
+	simSwapOverride *bool, demoLat, demoLon *float64) {
+
 	matrix := models.SignalMatrix{
 		DeviceID:  deviceID,
 		MSISDN:    msisdn,
 		Telemetry: telemetry,
+	}
+
+	// Apply overrides immediately (they will be used in refreshNetworkSignals as well)
+	if simSwapOverride != nil {
+		matrix.Nokia.SimSwapped = *simSwapOverride
+	}
+	if demoLat != nil && demoLon != nil {
+		matrix.Nokia.Lat = *demoLat
+		matrix.Nokia.Lon = *demoLon
 	}
 
 	e.mu.RLock()
@@ -77,7 +95,7 @@ func (e *Enricher) Process(deviceID, msisdn string, telemetry models.TagTelemetr
 			matrix.Nokia.QoDSessionID = state.qodSessionID
 			matrix.Nokia.SliceID = state.sliceID
 		}
-		e.refreshNetworkSignals(context.Background(), &matrix)
+		e.refreshNetworkSignals(context.Background(), &matrix, simSwapOverride, demoLat, demoLon)
 
 		// ---- Geofence check ----
 		if e.animalReg != nil {
@@ -120,6 +138,7 @@ func (e *Enricher) Process(deviceID, msisdn string, telemetry models.TagTelemetr
 			}
 		}()
 
+		// Update cache
 		e.mu.Lock()
 		e.cache[deviceID] = &networkState{
 			lat:             matrix.Nokia.Lat,
@@ -136,6 +155,7 @@ func (e *Enricher) Process(deviceID, msisdn string, telemetry models.TagTelemetr
 		}
 		e.mu.Unlock()
 	} else {
+		// Use cached network state
 		matrix.Nokia.Lat = state.lat
 		matrix.Nokia.Lon = state.lon
 		matrix.Nokia.SimSwapped = state.simSwapped
@@ -156,10 +176,14 @@ func (e *Enricher) Process(deviceID, msisdn string, telemetry models.TagTelemetr
 	}
 }
 
-// refreshNetworkSignals (unchanged, keep your existing implementation)
-func (e *Enricher) refreshNetworkSignals(ctx context.Context, matrix *models.SignalMatrix) {
+// refreshNetworkSignals calls the Nokia APIs in parallel and populates
+// the matrix's NokiaSignals field. If simulator overrides are present,
+// the corresponding Location / SIM Swap calls are skipped.
+func (e *Enricher) refreshNetworkSignals(ctx context.Context, matrix *models.SignalMatrix,
+	simSwapOverride *bool, demoLat, demoLon *float64) {
+
 	var wg sync.WaitGroup
-	wg.Add(7)
+	wg.Add(7) // still 7 goroutines (some may just return immediately)
 
 	delays := []time.Duration{
 		0,
@@ -171,9 +195,15 @@ func (e *Enricher) refreshNetworkSignals(ctx context.Context, matrix *models.Sig
 		900 * time.Millisecond,
 	}
 
+	// 1. Location
 	go func() {
 		defer wg.Done()
 		time.Sleep(delays[0])
+		if demoLat != nil && demoLon != nil {
+			matrix.Nokia.Lat = *demoLat
+			matrix.Nokia.Lon = *demoLon
+			return
+		}
 		loc, err := e.nokiaClient.GetDeviceLocation(ctx, matrix.MSISDN)
 		if err != nil {
 			config.LogError("NOKIA_LOC", err.Error())
@@ -183,9 +213,14 @@ func (e *Enricher) refreshNetworkSignals(ctx context.Context, matrix *models.Sig
 		matrix.Nokia.Lon = loc.Area.Center.Lon
 	}()
 
+	// 2. SIM Swap
 	go func() {
 		defer wg.Done()
 		time.Sleep(delays[1])
+		if simSwapOverride != nil {
+			matrix.Nokia.SimSwapped = *simSwapOverride
+			return
+		}
 		swap, err := e.nokiaClient.CheckSIMSwap(ctx, matrix.MSISDN)
 		if err != nil {
 			config.LogError("NOKIA_SWAP", err.Error())
@@ -194,6 +229,7 @@ func (e *Enricher) refreshNetworkSignals(ctx context.Context, matrix *models.Sig
 		matrix.Nokia.SimSwapped = swap.Swapped
 	}()
 
+	// 3. Device Reachability
 	go func() {
 		defer wg.Done()
 		time.Sleep(delays[2])
@@ -213,6 +249,7 @@ func (e *Enricher) refreshNetworkSignals(ctx context.Context, matrix *models.Sig
 		}
 	}()
 
+	// 4. Roaming
 	go func() {
 		defer wg.Done()
 		time.Sleep(delays[3])
@@ -226,6 +263,7 @@ func (e *Enricher) refreshNetworkSignals(ctx context.Context, matrix *models.Sig
 		config.LogInfo("NOKIA_ROAM", fmt.Sprintf("Roaming: %t | Country: %d", roam.Roaming, roam.CountryCode))
 	}()
 
+	// 5. Device Swap
 	go func() {
 		defer wg.Done()
 		time.Sleep(delays[4])
@@ -237,6 +275,7 @@ func (e *Enricher) refreshNetworkSignals(ctx context.Context, matrix *models.Sig
 		matrix.Nokia.DeviceSwapped = devSwap.Swapped
 	}()
 
+	// 6. QoD (only if no active session)
 	go func() {
 		defer wg.Done()
 		time.Sleep(delays[5])
@@ -252,6 +291,7 @@ func (e *Enricher) refreshNetworkSignals(ctx context.Context, matrix *models.Sig
 		config.LogInfo("NOKIA_QOD", fmt.Sprintf("Session created: %s", session.SessionID))
 	}()
 
+	// 7. Slicing (only if no active slice)
 	go func() {
 		defer wg.Done()
 		time.Sleep(delays[6])
@@ -271,6 +311,7 @@ func (e *Enricher) refreshNetworkSignals(ctx context.Context, matrix *models.Sig
 	matrix.Nokia.CongestionLevel = "Low"
 }
 
+// logTelemetry prints the enriched telemetry line using the ANSI logger.
 func (e *Enricher) logTelemetry(m *models.SignalMatrix) {
 	config.LogEnrich(
 		m.DeviceID,
